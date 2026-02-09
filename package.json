@@ -1,0 +1,19 @@
+{
+  "name": "happyclaw",
+  "version": "0.0.1",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "phase0": "for f in phase0/0*.ts; do echo \"\\n=== Running $f ===\"; npx tsx \"$f\" || true; done"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "^25.2.2",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

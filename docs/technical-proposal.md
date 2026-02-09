@@ -202,7 +202,7 @@ interface SessionEvent {
   timestamp: number;
   /** 权限请求的详细信息（SDK 模式下可提供精确的工具名和参数） */
   permissionDetail?: {
-    requestId: string;   // 用于关联 session.respond 回复
+    requestId: string;   // SDK 提供的 toolUseID，用于关联 session.respond 回复
     toolName: string;
     input: unknown;
   };
@@ -284,8 +284,10 @@ class ClaudeSDKProvider implements SessionProvider {
   }
 
   async resume(sessionId: string, options: SpawnOptions): Promise<ProviderSession> {
-    // 使用 --resume <sessionId> 恢复会话
-    return this.spawn({ ...options, args: [...(options.args || []), '--resume', sessionId] });
+    // 通过 SpawnOptions.resumeSessionId 传递，各 Session 类型内部处理恢复方式
+    // 远程模式：ClaudeRemoteSession 读取 resumeSessionId 传给 SDK query({ options: { resume } })
+    // 本地模式：ClaudeLocalSession 读取 resumeSessionId 拼接 CLI args --resume
+    return this.spawn({ ...options, resumeSessionId: sessionId });
   }
 }
 ```
@@ -297,8 +299,14 @@ class ClaudeLocalSession implements ProviderSession {
   private child: ChildProcess;
 
   constructor(options: SpawnOptions) {
+    // 本地模式：从 resumeSessionId 构建 --resume CLI arg
+    const args = [...(options.args || [])];
+    if (options.resumeSessionId) {
+      args.push('--resume', options.resumeSessionId);
+    }
+
     // 和直接跑 claude 完全一样
-    this.child = spawn('claude', options.args || [], {
+    this.child = spawn('claude', args, {
       stdio: ['inherit', 'inherit', 'inherit', 'pipe'],  // fd3 追踪状态
       cwd: options.cwd,
     });
@@ -331,7 +339,7 @@ class ClaudeRemoteSession implements ProviderSession {
         cwd: options.cwd,
         resume: options.resumeSessionId,
         permissionMode: 'default',
-        systemPrompt: 'default',       // 确保加载默认 system prompt
+        systemPrompt: { type: 'preset', preset: 'claude_code' },  // 加载 Claude Code 默认 system prompt
         settingSources: ['project'],    // 确保读取 CLAUDE.md 等项目配置
         canUseTool: (toolName, input, opts) => this.handlePermission(toolName, input, opts),
       },
@@ -344,6 +352,7 @@ class ClaudeRemoteSession implements ProviderSession {
     this.messages.push({
       type: 'user',
       session_id: this.sessionId,
+      parent_tool_use_id: null,  // 顶层消息，非 tool 响应
       message: { role: 'user', content: input },
     });
   }
@@ -360,19 +369,21 @@ class ClaudeRemoteSession implements ProviderSession {
     }
   }
 
-  private async handlePermission(toolName: string, input: unknown, opts: { signal: AbortSignal }): Promise<PermissionResult> {
-    const requestId = crypto.randomUUID();
-    // 推送权限请求给远程用户，等待回复
+  private async handlePermission(
+    toolName: string, input: Record<string, unknown>,
+    opts: { signal: AbortSignal; toolUseID: string; decisionReason?: string }
+  ): Promise<PermissionResult> {
+    // 使用 SDK 提供的 toolUseID 作为关联 ID（无需自行生成 requestId）
     this.emitEvent({
       type: 'permission_request',
       severity: 'urgent',
       summary: `Claude 想要使用 ${toolName}`,
       sessionId: this.id,
       timestamp: Date.now(),
-      permissionDetail: { requestId, toolName, input },
+      permissionDetail: { requestId: opts.toolUseID, toolName, input },
     });
     // 带超时的等待：超时后默认 deny，避免无限阻塞
-    return this.waitForPermissionResponse(requestId, opts.signal, this.permissionTimeout);
+    return this.waitForPermissionResponse(opts.toolUseID, opts.signal, this.permissionTimeout);
   }
 }
 ```
@@ -453,7 +464,7 @@ class PTYRemoteSession implements ProviderSession {
 class SessionManager {
   private sessions = new Map<string, ProviderSession>();
   private providers = new Map<string, SessionProvider>();
-  private switchState = new Map<string, 'running' | 'draining' | 'switching'>();
+  private switchState = new Map<string, 'running' | 'draining' | 'switching' | 'error'>();
   private maxSessions = 10;  // 防止资源耗尽
   private cwdWhitelist: string[] = [];  // 允许的项目目录（空 = 不限制）
 
@@ -468,7 +479,7 @@ class SessionManager {
     return session;
   }
 
-  async spawn(providerName: string, options: SpawnOptions): Promise<ProviderSession> {
+  async spawn(providerName: string, options: SpawnOptions, ownerId?: string): Promise<ProviderSession> {
     const provider = this.providers.get(providerName);
     if (!provider) throw new Error(`Unknown provider: ${providerName}`);
 
@@ -484,6 +495,11 @@ class SessionManager {
     const session = await provider.spawn({ ...options, cwd: resolvedCwd });
     this.sessions.set(session.id, session);
     this.switchState.set(session.id, 'running');
+
+    // 先绑定 owner，再开始事件转发，避免 spawn 和 setOwner 之间的竞态
+    if (ownerId) {
+      sessionACL.setOwner(session.id, ownerId);
+    }
 
     // 监听事件，转发给 OpenClaw 消息系统
     session.onEvent((event) => this.forwardEvent(event));
@@ -550,11 +566,13 @@ class SessionManager {
       newSession.onMessage((msg) => this.bufferMessage(sessionId, msg));
       this.monitorProcess(newSession);
     } catch (err) {
-      // resume 失败时回滚：标记 session 为 error 状态，通知用户
-      this.switchState.set(sessionId, 'running');
+      // resume 失败：旧 session 已 stop，新 session 未启动
+      // 标记为 error 状态并从活跃 Map 中移除，避免后续操作命中已死 session
+      this.switchState.set(sessionId, 'error');
+      this.sessions.delete(sessionId);
       this.forwardEvent({
         type: 'error', severity: 'urgent', sessionId, timestamp: Date.now(),
-        summary: `模式切换失败: ${err instanceof Error ? err.message : String(err)}`,
+        summary: `模式切换失败，session 已不可用。请使用 session.spawn 创建新 session 或 session.resume 手动恢复: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
   }
@@ -620,8 +638,8 @@ const tools = {
       mode: { type: 'string', enum: ['local', 'remote'], default: 'local' }
     },
     handler: async ({ provider, cwd, mode }, caller: CallerContext) => {
-      const session = await sessionManager.spawn(provider, { cwd, mode });
-      sessionACL.setOwner(session.id, caller.userId);  // 绑定 owner
+      // ownerId 传入 spawn()，在事件转发启动前绑定，避免竞态
+      const session = await sessionManager.spawn(provider, { cwd, mode }, caller.userId);
       return session;
     }
   },
@@ -806,17 +824,16 @@ const response = query({
   options: {
     cwd,
     resume: sessionId,
-    systemPrompt: 'default',       // 加载默认 system prompt
+    systemPrompt: { type: 'preset', preset: 'claude_code' },  // 加载 Claude Code 默认 system prompt
     settingSources: ['project'],    // 读取 CLAUDE.md 等项目配置
-    canUseTool: async (toolName, input, { signal }) => {
-      const requestId = crypto.randomUUID();
-      // 推送权限请求给远程用户
+    canUseTool: async (toolName, input, { signal, toolUseID, decisionReason }) => {
+      // 使用 SDK 提供的 toolUseID 作为关联 ID（无需自行生成 requestId）
       emitEvent({
         type: 'permission_request',
-        permissionDetail: { requestId, toolName, input },
+        permissionDetail: { requestId: toolUseID, toolName, input, decisionReason },
       });
       // 带超时的等待（默认 5 分钟，超时 deny）
-      return waitForResponse(requestId, signal, PERMISSION_TIMEOUT);
+      return waitForResponse(toolUseID, signal, PERMISSION_TIMEOUT);
     },
   },
 });
@@ -852,12 +869,12 @@ function handleSpecialCommand(input: string): boolean {
 ```
 本地 → 远程：
   1. 终止本地 Claude Code 进程（SIGTERM）
-  2. 以 SDK 模式启动新进程（--resume <sessionId> --output-format stream-json）
+  2. 以 SDK 模式启动新进程（SpawnOptions.resumeSessionId → SDK query({ resume })）
   3. 会话上下文通过 Claude Code 的 session 持久化机制恢复
 
 远程 → 本地：
   1. 终止 SDK 模式进程
-  2. 以本地模式启动新进程（--resume <sessionId>，stdio inherit）
+  2. 以本地模式启动新进程（SpawnOptions.resumeSessionId → CLI args --resume <sessionId>，stdio inherit）
   3. 用户在终端看到恢复的会话
 ```
 
@@ -1245,7 +1262,7 @@ query({
     resume,
     permissionMode: 'default',
     canUseTool: ...,
-    systemPrompt: 'default',     // ← 确保加载默认 system prompt
+    systemPrompt: { type: 'preset', preset: 'claude_code' },  // ← 加载 Claude Code 默认 prompt
     settingSources: ['project'],  // ← 确保读取 CLAUDE.md 等配置
   },
 });
@@ -1306,7 +1323,7 @@ query({
 | C-4 daemon 环境 | ✅ PASS | §3.1 设计原则已明确 happyclaw CLI wrapper 方案 |
 | C-5 SDK 包名 | ✅ PASS | 已更新为 @anthropic-ai/claude-agent-sdk |
 | C-6 systemPrompt | ✅ PASS | query() 调用已添加 systemPrompt + settingSources |
-| M-1 状态机 | ⚠️ PARTIAL | 状态机已添加，但 rollback 路径有问题（见 12.2） |
+| M-1 状态机 | ✅ PASS | 状态机已添加，rollback 路径已修正（R3-2 修复：error 状态 + 清理 Map） |
 | M-2 接口补全 | ✅ PASS | SpawnOptions.resumeSessionId + SessionManager.resume/get 已添加 |
 | M-7 SDKUserMessage | ✅ PASS | send() 中已添加 session_id |
 | M-8 fd3 解析 | ✅ PASS | 已改为行分隔缓冲模式 |
@@ -1320,37 +1337,29 @@ query({
 
 ### 12.2 新发现的问题
 
-#### R3-1. resume 路径内部不一致 🔴 Critical
+#### R3-1. resume 路径内部不一致 🔴 Critical ✅ 已修正
 
 **来源**：Codex R3
 
-Provider 的 `resume()` 通过 CLI args 传递 `--resume`（§3.3.2 第 286 行），但 SDK 远程模式的构造函数通过 `options.resumeSessionId` 读取（第 332 行）。这两条路径冲突——远程模式 resume 会失败。
+Provider 的 `resume()` 通过 CLI args 传递 `--resume`，但 SDK 远程模式的构造函数通过 `options.resumeSessionId` 读取。这两条路径冲突——远程模式 resume 会失败。
 
-```typescript
-// Provider.resume() 做的事：
-return this.spawn({ ...options, args: [...(options.args || []), '--resume', sessionId] });
+**修正**：`ClaudeSDKProvider.resume()` 改为通过 `SpawnOptions.resumeSessionId` 传递 session ID。各 Session 类型内部按需处理：远程模式读取 `resumeSessionId` 传给 SDK `query({ options: { resume } })`，本地模式读取 `resumeSessionId` 拼接 CLI args `--resume`。模式切换描述（§4.1）也已同步更新。
 
-// 但 ClaudeRemoteSession 构造函数期望的是：
-resume: options.resumeSessionId,  // 这个字段不会被 args 传递填充
-```
-
-**修复方向**：远程模式的 resume 应通过 `SpawnOptions.resumeSessionId` 而非 CLI args。
-
-#### R3-2. rollback 后 session 状态不一致 🟠 Major
+#### R3-2. rollback 后 session 状态不一致 🟠 Major ✅ 已修正
 
 **来源**：Codex R3
 
 `switchMode()` 中 `stop()` 成功但 `resume()` 失败时，catch 块把 switchState 设回 `'running'`，但旧 session 已经被 stop 了。此时 sessions Map 中仍持有已停止的旧 session，后续操作会失败。
 
-**修复方向**：resume 失败时应从 Map 中移除 session 或标记为 `'error'` 状态，并通知用户需要手动恢复。
+**修正**：catch 块现在将 switchState 设为 `'error'`，从 sessions Map 中删除该 session，并通知用户需使用 `session.spawn` 创建新 session 或 `session.resume` 手动恢复。
 
-#### R3-3. ACL 绑定时序问题 🟠 Major
+#### R3-3. ACL 绑定时序问题 🟠 Major ✅ 已修正
 
 **来源**：Codex R3
 
 `session.spawn` handler 中先 `sessionManager.spawn()` 再 `sessionACL.setOwner()`。但 `spawn()` 内部已经开始 `onEvent` 转发。如果 spawn 期间立即产生事件（如权限请求），事件已发出但 owner 尚未绑定，可能被错误路由。
 
-**修复方向**：owner binding 应在 `SessionManager.spawn()` 内部完成，或 spawn 返回前暂缓事件转发。
+**修正**：`SessionManager.spawn()` 新增 `ownerId` 参数，在事件转发（`onEvent`/`onMessage`）启动前调用 `sessionACL.setOwner()`。`session.spawn` tool handler 不再单独调用 `setOwner`，而是将 `caller.userId` 传入 `spawn()`。
 
 #### R3-4. PTY session 的 read() 未适配游标模型 🟡 Minor
 
@@ -1374,14 +1383,14 @@ cursor 是什么格式？是递增整数、时间戳、还是 opaque token？过
 
 | 维度 | Round 2 评估 | Round 3 评估 | 变化 |
 |------|-------------|-------------|------|
-| 接口定义 | ⚠️ 需修正 | ✅ 基本就绪 | 大部分接口已完善，仅 PTY read() 和 resume 路径需修正 |
+| 接口定义 | ⚠️ 需修正 | ✅ 就绪 | 接口已完善，resume 路径已统一（R3-1），仅 PTY read() 游标为 minor |
 | SDK API 准确性 | 🔴 需重写 | ✅ 已修正 | 包名、回调名、配置参数均已更新（待 Phase 0 最终验证） |
-| 安全模型 | 🔴 未就绪 | ⚠️ 基本就绪 | CallerContext + ACL 已添加，但有 ACL 时序问题和 cwd 绕过 |
-| 错误/恢复流程 | ⚠️ 不完整 | ⚠️ 大部分就绪 | 有状态机和超时，但 rollback 和 reconcile 仍为 stub |
+| 安全模型 | 🔴 未就绪 | ✅ 就绪 | CallerContext + ACL 已添加，ACL 时序已修正（R3-3），cwd 绕过为 minor |
+| 错误/恢复流程 | ⚠️ 不完整 | ✅ 基本就绪 | 状态机 + 超时 + rollback 已修正（R3-2），reconcile 为 stub 待实现 |
 | 实现计划 | ⚠️ 需调整 | ✅ 已调整 | Phase 0 + 安全前移 + Phase 3 拆分 |
 
 ### 12.4 总体结论
 
-**方案已接近实现就绪**。Round 1 发现 22 个问题，Round 2 又发现 13 个，Round 3 验证大部分已修正，剩余 3 个需修正的问题（R3-1 resume 路径、R3-2 rollback 状态、R3-3 ACL 时序）均为实现细节，可在 Phase 0/Phase 1 编码时同步解决。
+**方案已达到实现就绪**。Round 1 发现 22 个问题，Round 2 又发现 13 个，Round 3 验证后全部 Critical/Major 问题已修正（含 R3-1 resume 路径统一、R3-2 rollback 状态清理、R3-3 ACL 时序修正）。剩余 Minor 问题（R3-4 PTY 游标、R3-5 游标语义、R3-6 cwd 绕过）可在 Phase 0/Phase 1 编码时同步解决。
 
-**建议**：不再继续文档层面的审查迭代。剩余问题适合在 Phase 0（SDK 验证冲刺）中通过实际编码验证和修正。
+**建议**：不再继续文档层面的审查迭代。可直接进入 Phase 0（SDK 验证冲刺）。
