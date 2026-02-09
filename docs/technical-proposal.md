@@ -927,3 +927,104 @@ happyclaw/
 1. 不需要额外的 Server、App、用户体系——OpenClaw 全都有
 2. 通过 GenericPTYProvider 额外支持没有 SDK 的 CLI 工具
 3. 作为 OpenClaw Plugin，天然融入现有的 Agent 生态
+
+## 10. 评审发现（v2 审查）
+
+> 评审日期：2026-02-09
+> 评审方式：3 个 Claude Agent（架构 / SDK可行性 / 安全）并行审查 + Codex (GPT-5.3) 跨模型独立审查
+> 详细报告：`docs/reviews/consolidated-review-v2.md`
+
+### 10.1 Critical — 必须在实现前修正
+
+#### C-1. SDK API 名称错误：`canCallTool` → `canUseTool`
+
+**来源**：Codex + sdk-reviewer（跨模型共识）
+
+方案中多处使用 `canCallTool`（§3.3.2, §4.1），但 Claude Agent SDK 实际 API 为 `canUseTool`。
+
+```typescript
+// ❌ 方案中写的
+canCallTool: (toolName, input, opts) => this.handlePermission(toolName, input, opts),
+
+// ✅ 实际 SDK API（待核实最新文档）
+canUseTool: (toolName, input, opts) => this.handlePermission(toolName, input, opts),
+```
+
+#### C-2. 权限请求缺少 `requestId` 关联
+
+**来源**：Codex + security-reviewer（跨模型共识）
+
+`pty.respond` 需要 `requestId`（§3.4），但 `SessionEvent.permissionDetail` 中没有 `requestId` 字段（§3.3.1）。远程用户无法可靠地回复特定权限请求。
+
+```typescript
+// 当前定义 — 缺少 requestId
+permissionDetail?: {
+  toolName: string;
+  input: unknown;
+};
+
+// 应改为
+permissionDetail?: {
+  requestId: string;  // ← 补充
+  toolName: string;
+  input: unknown;
+};
+```
+
+#### C-3. 安全控制延迟到 Phase 4
+
+**来源**：Codex + security-reviewer + arch-reviewer（三方共识）
+
+Session owner binding、cwd 白名单、审计日志放在 Phase 4，但 Plugin tools 从 Phase 1 就暴露 list/read/send/stop 且无鉴权。在共享 Gateway 环境下，任何能访问 Gateway 的用户可操控所有 CLI session。
+
+**行动项**：将 session owner binding 和基本 ACL 移到 Phase 1。
+
+#### C-4. 本地模式 stdio inherit 在 daemon 环境不可行
+
+**来源**：Codex + arch-reviewer（跨模型共识）
+
+方案假设本地模式用 `stdio: ['inherit', ...]`，但 HappyClaw 作为 Plugin 运行在 Gateway 进程中。如果 Gateway 是后台 daemon（headless），stdio inherit 无法提供终端体验。
+
+Happy Coder 是独立 CLI 工具，直接在用户终端运行，所以 stdio inherit 有效。HappyClaw 作为 Plugin，本地模式的 UX 需另行设计（如 `happyclaw` CLI wrapper 在用户终端启动，Plugin 在后台桥接）。
+
+### 10.2 Major — 强烈建议修正
+
+| # | 问题 | 来源 | 说明 |
+|---|------|------|------|
+| M-1 | 模式切换非原子操作 | Codex + arch | `stop()` → `resume()` 之间无 drain/lock，可能丢失 in-flight 消息。建议添加状态机 `running → draining → switching → resumed` |
+| M-2 | SpawnOptions 接口不一致 | Codex + sdk | 缺少 `resumeSessionId` 字段；`sessionManager.resume/get` 在 tools 中使用但类中未定义 |
+| M-3 | Session ID 恢复后可能变化 | Codex | `--resume` 后 SDK 可能分配新 ID，但 Manager 用旧 ID 做 key。建议使用 HappyClaw 自有稳定 ID |
+| M-4 | PushableAsyncIterable 未定义 | Codex + sdk | 非标准库/SDK 类型，需自行实现且需处理背压 |
+| M-5 | cwd 安全控制缺失 | Codex + security | `pty.spawn` 接受任意 cwd，无白名单。恶意用户可指定敏感目录 |
+| M-6 | Phase 3 工期乐观 | Codex + sdk | Codex MCP "待调研" + Gemini PTY 打包 3-4 天不够。建议拆分：3a Gemini PTY (2-3天) + 3b Codex MCP (3-5天) |
+
+### 10.3 Minor — 建议改进
+
+| # | 问题 | 说明 |
+|---|------|------|
+| m-1 | `pty.*` 命名与架构不匹配 | 核心已是 SDK/MCP/PTY 混合，建议改为 `session.*` 或 `cli.*` |
+| m-2 | cwd 字符串严格匹配 | `~/projects` vs `/Users/pope/projects` vs symlink 会匹配失败，需 `path.resolve` + `realpathSync` |
+| m-3 | 输出摘要无完整获取机制 | "发 '查看完整输出' 获取全文" 无对应 API，需添加分页参数 |
+| m-4 | Discord 2000 字符限制未提及 | 方案只提了 Telegram 4096，需添加 Discord 适配 |
+| m-5 | 权限请求超时处理缺失 | 远程用户不回复时 `waitForPermissionResponse` 会无限等待。需可配置超时 + 默认 deny |
+| m-6 | CLI 进程崩溃恢复缺失 | 进程退出后 session 仍在 Map 中，需监听 `exit` 事件更新状态 |
+
+### 10.4 Suggestion — 可选优化
+
+| # | 建议 | 来源 |
+|---|------|------|
+| S-1 | 添加模式切换状态机：`running → draining → switching → resumed` | Codex + arch |
+| S-2 | 添加兼容性矩阵：Claude CLI 版本、SDK 包名/版本、各 Provider 降级行为 | Codex |
+| S-3 | SDK 消息类型完整映射（不只列 high-level type，要对每个 subtype 定义转换规则） | Codex |
+| S-4 | 添加故障模式测试：切换期间工具执行、重复权限请求、plugin 重启、stale requestId | Codex |
+| S-5 | 添加 session 心跳机制，检测 CLI 进程健康状态 | arch + security |
+
+### 10.5 v1 → v2 改进确认
+
+| v1 Critical 问题 | v2 状态 |
+|------------------|---------|
+| PTY Attach 在 macOS 不可行 | ✅ 已移除，改为 SDK 模式切换 |
+| 终端输出解析脆弱（strip-ansi 不够） | ✅ SDK 模式不需要解析，PTY 仅作后备 |
+| 缺少 VT100 终端模拟器 | ✅ PTY 模式中已加入 xterm-headless |
+| 无认证/授权设计 | ⚠️ 提到但延迟到 Phase 4，需前移（见 C-3） |
+| 输入注入风险 | ⚠️ SDK 模式下风险降低（结构化输入），PTY 模式仍需处理 |
