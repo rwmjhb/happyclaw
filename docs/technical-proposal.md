@@ -1289,3 +1289,99 @@ query({
 3. **设计调用者身份传播**：明确 OpenClaw Plugin API 如何传递 caller identity 到 tool handlers
 4. **定义安全基线接口**：`SessionACL`、`CwdWhitelist`、`SpawnLimiter` 的接口签名
 5. **补全错误恢复流程**：crash recovery、switch rollback、permission timeout 状态图
+
+## 12. 评审发现（Round 3 审查）
+
+> 评审日期：2026-02-09
+> 评审方式：3 个 Claude Agent（修复验证 / 就绪度评估 / 全新审查）+ Codex (GPT-5.3) 跨模型第三轮审查
+> 说明：Round 3 在所有修正应用后进行验证审查
+
+### 12.1 修正验证结果
+
+| 发现 ID | 修正状态 | 说明 |
+|---------|---------|------|
+| C-1 canUseTool | ✅ PASS | §3.3.2 和 §4.1 均已修正 |
+| C-2 requestId | ✅ PASS | permissionDetail 已添加 requestId，handlePermission 生成 UUID |
+| C-3 安全前移 | ✅ PASS | CallerContext + SessionACL + cwd 白名单已在 §3.4 和 §3.3.4 实现 |
+| C-4 daemon 环境 | ✅ PASS | §3.1 设计原则已明确 happyclaw CLI wrapper 方案 |
+| C-5 SDK 包名 | ✅ PASS | 已更新为 @anthropic-ai/claude-agent-sdk |
+| C-6 systemPrompt | ✅ PASS | query() 调用已添加 systemPrompt + settingSources |
+| M-1 状态机 | ⚠️ PARTIAL | 状态机已添加，但 rollback 路径有问题（见 12.2） |
+| M-2 接口补全 | ✅ PASS | SpawnOptions.resumeSessionId + SessionManager.resume/get 已添加 |
+| M-7 SDKUserMessage | ✅ PASS | send() 中已添加 session_id |
+| M-8 fd3 解析 | ✅ PASS | 已改为行分隔缓冲模式 |
+| M-9 SDK vs CLI | ✅ PASS | §4.1 开头已明确使用 SDK query() 而非 CLI |
+| M-10 游标分页 | ⚠️ PARTIAL | 接口已添加，但 PTY session 的 read() 仍用旧签名 |
+| M-11 CallerContext | ✅ PASS | 所有 tool handler 已接收 CallerContext |
+| M-12 启动恢复 | ⚠️ PARTIAL | reconcileOnStartup 方法已添加，但只是 stub |
+| M-13 权限超时 | ✅ PASS | 5 分钟超时 + 默认 deny |
+| m-1 命名空间 | ✅ PASS | 全部改为 session.* |
+| m-4 Discord | ⚠️ PARTIAL | formatForDiscord 已添加到 §4.4，但 Phase 4 仍列为 TODO |
+
+### 12.2 新发现的问题
+
+#### R3-1. resume 路径内部不一致 🔴 Critical
+
+**来源**：Codex R3
+
+Provider 的 `resume()` 通过 CLI args 传递 `--resume`（§3.3.2 第 286 行），但 SDK 远程模式的构造函数通过 `options.resumeSessionId` 读取（第 332 行）。这两条路径冲突——远程模式 resume 会失败。
+
+```typescript
+// Provider.resume() 做的事：
+return this.spawn({ ...options, args: [...(options.args || []), '--resume', sessionId] });
+
+// 但 ClaudeRemoteSession 构造函数期望的是：
+resume: options.resumeSessionId,  // 这个字段不会被 args 传递填充
+```
+
+**修复方向**：远程模式的 resume 应通过 `SpawnOptions.resumeSessionId` 而非 CLI args。
+
+#### R3-2. rollback 后 session 状态不一致 🟠 Major
+
+**来源**：Codex R3
+
+`switchMode()` 中 `stop()` 成功但 `resume()` 失败时，catch 块把 switchState 设回 `'running'`，但旧 session 已经被 stop 了。此时 sessions Map 中仍持有已停止的旧 session，后续操作会失败。
+
+**修复方向**：resume 失败时应从 Map 中移除 session 或标记为 `'error'` 状态，并通知用户需要手动恢复。
+
+#### R3-3. ACL 绑定时序问题 🟠 Major
+
+**来源**：Codex R3
+
+`session.spawn` handler 中先 `sessionManager.spawn()` 再 `sessionACL.setOwner()`。但 `spawn()` 内部已经开始 `onEvent` 转发。如果 spawn 期间立即产生事件（如权限请求），事件已发出但 owner 尚未绑定，可能被错误路由。
+
+**修复方向**：owner binding 应在 `SessionManager.spawn()` 内部完成，或 spawn 返回前暂缓事件转发。
+
+#### R3-4. PTY session 的 read() 未适配游标模型 🟡 Minor
+
+**来源**：Codex R3 + fix-verifier
+
+`ProviderSession.read()` 接口已改为 `{ cursor, limit } → { messages, nextCursor }`，但 §4.3 的 `PTYRemoteSession.read()` 仍使用旧的 `outputBuffer.slice()` 实现，未返回 nextCursor。
+
+#### R3-5. 游标 token 语义未定义 🟡 Minor
+
+**来源**：Codex R3
+
+cursor 是什么格式？是递增整数、时间戳、还是 opaque token？过期策略？客户端使用旧 cursor 会怎样？
+
+#### R3-6. cwd 白名单用 startsWith 可被绕过 🟡 Minor
+
+**来源**：Codex R3
+
+`resolvedCwd.startsWith(w)` 匹配 — 如果白名单是 `/Users/pope/projects`，则 `/Users/pope/projects-evil` 也会通过。应使用 `resolvedCwd === w || resolvedCwd.startsWith(w + path.sep)` 或 `realpath` 对比。
+
+### 12.3 实现就绪度评估（Round 3）
+
+| 维度 | Round 2 评估 | Round 3 评估 | 变化 |
+|------|-------------|-------------|------|
+| 接口定义 | ⚠️ 需修正 | ✅ 基本就绪 | 大部分接口已完善，仅 PTY read() 和 resume 路径需修正 |
+| SDK API 准确性 | 🔴 需重写 | ✅ 已修正 | 包名、回调名、配置参数均已更新（待 Phase 0 最终验证） |
+| 安全模型 | 🔴 未就绪 | ⚠️ 基本就绪 | CallerContext + ACL 已添加，但有 ACL 时序问题和 cwd 绕过 |
+| 错误/恢复流程 | ⚠️ 不完整 | ⚠️ 大部分就绪 | 有状态机和超时，但 rollback 和 reconcile 仍为 stub |
+| 实现计划 | ⚠️ 需调整 | ✅ 已调整 | Phase 0 + 安全前移 + Phase 3 拆分 |
+
+### 12.4 总体结论
+
+**方案已接近实现就绪**。Round 1 发现 22 个问题，Round 2 又发现 13 个，Round 3 验证大部分已修正，剩余 3 个需修正的问题（R3-1 resume 路径、R3-2 rollback 状态、R3-3 ACL 时序）均为实现细节，可在 Phase 0/Phase 1 编码时同步解决。
+
+**建议**：不再继续文档层面的审查迭代。剩余问题适合在 Phase 0（SDK 验证冲刺）中通过实际编码验证和修正。
