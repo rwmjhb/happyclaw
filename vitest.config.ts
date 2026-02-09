@@ -16,6 +16,7 @@ export default defineConfig({
         'src/providers/index.ts',
         'src/formatters/index.ts',
         'src/security/index.ts',
+        'src/openclaw-plugin.ts',
       ],
       thresholds: {
         statements: 70,

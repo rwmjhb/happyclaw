@@ -67,3 +67,6 @@ export type {
 } from './types/index.js';
 
 export { AsyncQueue } from './types/index.js';
+
+// OpenClaw plugin entry
+export { default as happyclawPlugin } from './openclaw-plugin.js';

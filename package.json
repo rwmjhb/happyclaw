@@ -11,8 +11,14 @@
     "test:coverage": "vitest run --coverage",
     "phase0": "for f in phase0/0*.ts; do echo \"\\n=== Running $f ===\"; npx tsx \"$f\" || true; done"
   },
+  "openclaw": {
+    "extensions": [
+      "./src/openclaw-plugin.ts"
+    ]
+  },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "latest",
+    "@sinclair/typebox": "^0.34.48",
     "@xterm/headless": "^6.0.0",
     "node-pty": "^1.1.0",
     "strip-ansi": "^7.1.2"
@@ -25,6 +31,9 @@
     "vitest": "^4.0.18"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["node-pty", "esbuild"]
+    "onlyBuiltDependencies": [
+      "node-pty",
+      "esbuild"
+    ]
   }
 }
