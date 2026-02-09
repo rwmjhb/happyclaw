@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   createMockSession,
   createMockProvider,
@@ -397,6 +397,149 @@ describe('SessionManager', () => {
       );
 
       expect(manager.size).toBe(1);
+    });
+  });
+
+  describe('retryResume', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('retries with exponential backoff and succeeds', async () => {
+      const mockSession = createMockSession({ id: 'retry-ok', mode: 'remote' });
+      mockProvider._setNextSession(mockSession);
+      await manager.spawn(
+        'claude',
+        { cwd: '/tmp/test', mode: 'remote' },
+        'user-1',
+      );
+
+      const resumedSession = createMockSession({ id: 'retry-ok', mode: 'remote' });
+
+      // Fail first, succeed second
+      (mockProvider.resume as ReturnType<typeof vi.fn>)
+        .mockRejectedValueOnce(new Error('temporary failure'))
+        .mockResolvedValueOnce(resumedSession);
+
+      const promise = manager.retryResume('retry-ok', {
+        maxRetries: 3,
+        baseDelayMs: 100,
+      });
+
+      // Advance through first delay (100ms * 2^0 = 100ms)
+      await vi.advanceTimersByTimeAsync(150);
+      // Advance through second delay (100ms * 2^1 = 200ms)
+      await vi.advanceTimersByTimeAsync(250);
+
+      const session = await promise;
+      expect(session.id).toBe('retry-ok');
+    });
+
+    it('exhausts retries and throws', async () => {
+      const mockSession = createMockSession({ id: 'retry-fail', mode: 'remote' });
+      mockProvider._setNextSession(mockSession);
+      await manager.spawn(
+        'claude',
+        { cwd: '/tmp/test', mode: 'remote' },
+        'user-1',
+      );
+
+      // Fail all attempts
+      (mockProvider.resume as ReturnType<typeof vi.fn>)
+        .mockRejectedValue(new Error('persistent failure'));
+
+      const events: SessionEvent[] = [];
+      manager.on('event', (e: SessionEvent) => events.push(e));
+
+      const promise = manager.retryResume('retry-fail', {
+        maxRetries: 2,
+        baseDelayMs: 50,
+      });
+
+      // Attach catch handler immediately to prevent unhandled rejection
+      const resultPromise = promise.catch((err: Error) => err);
+
+      // Advance through all delays
+      await vi.advanceTimersByTimeAsync(50);  // attempt 1 (50ms)
+      await vi.advanceTimersByTimeAsync(100); // attempt 2 (100ms)
+      await vi.advanceTimersByTimeAsync(200); // extra time
+
+      const error = await resultPromise;
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toMatch(/after 2 retries/i);
+
+      // Should have emitted retry attempt events
+      const retryEvents = events.filter((e) =>
+        e.summary.includes('Retry attempt'),
+      );
+      expect(retryEvents).toHaveLength(2);
+
+      // Should have emitted exhaustion event
+      const exhausted = events.find((e) =>
+        e.summary.includes('retry attempts exhausted'),
+      );
+      expect(exhausted).toBeDefined();
+      expect(exhausted!.severity).toBe('urgent');
+    });
+
+    it('emits info events for each retry attempt', async () => {
+      const mockSession = createMockSession({ id: 'retry-evt', mode: 'remote' });
+      mockProvider._setNextSession(mockSession);
+      await manager.spawn(
+        'claude',
+        { cwd: '/tmp/test', mode: 'remote' },
+        'user-1',
+      );
+
+      const resumedSession = createMockSession({ id: 'retry-evt', mode: 'remote' });
+      (mockProvider.resume as ReturnType<typeof vi.fn>)
+        .mockRejectedValueOnce(new Error('fail'))
+        .mockResolvedValueOnce(resumedSession);
+
+      const events: SessionEvent[] = [];
+      manager.on('event', (e: SessionEvent) => events.push(e));
+
+      const promise = manager.retryResume('retry-evt', {
+        maxRetries: 3,
+        baseDelayMs: 50,
+      });
+
+      await vi.advanceTimersByTimeAsync(50);
+      await vi.advanceTimersByTimeAsync(100);
+      await vi.advanceTimersByTimeAsync(200);
+
+      await promise;
+
+      const retryInfoEvents = events.filter(
+        (e) => e.summary.includes('Retry attempt'),
+      );
+      expect(retryInfoEvents.length).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  describe('readMessages with redaction', () => {
+    it('redacts sensitive content in messages', async () => {
+      const mockSession = createMockSession({ id: 'redact-test' });
+      mockProvider._setNextSession(mockSession);
+      await manager.spawn(
+        'claude',
+        { cwd: '/tmp/test', mode: 'remote' },
+        'user-1',
+      );
+
+      mockSession._emitMessage({
+        type: 'text',
+        content: 'Bearer mysecrettoken123',
+        timestamp: Date.now(),
+      });
+
+      const result = manager.readMessages('redact-test');
+      expect(result.messages[0].content).toContain('Bearer [REDACTED]');
+      expect(result.messages[0].content).not.toContain('mysecrettoken123');
     });
   });
 });

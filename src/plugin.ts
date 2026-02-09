@@ -19,6 +19,9 @@ import type {
   SwitchState,
 } from './types/index.js';
 import { parseCommand } from './commands.js';
+import type { AuditLogger } from './audit.js';
+import { summarizeSession } from './summary.js';
+import type { SessionSummary } from './summary.js';
 
 // ---------------------------------------------------------------------------
 // Tool parameter / result types
@@ -67,6 +70,10 @@ export interface SessionStopParams {
   force?: boolean;
 }
 
+export interface SessionSummaryParams {
+  sessionId: string;
+}
+
 export interface SessionInfo {
   id: string;
   provider: string;
@@ -90,10 +97,37 @@ export interface PluginTool<P, R> {
   handler: (params: P, caller: CallerContext) => Promise<R>;
 }
 
+export interface PluginToolsOptions {
+  /** Optional audit logger for recording tool invocations */
+  auditLogger?: AuditLogger;
+}
+
+/** Fire-and-forget audit log (never throws). */
+function auditLog(
+  logger: AuditLogger | undefined,
+  userId: string,
+  action: string,
+  sessionId: string,
+  details?: Record<string, unknown>,
+): void {
+  if (!logger) return;
+  logger.log({
+    timestamp: Date.now(),
+    userId,
+    action,
+    sessionId,
+    details,
+  }).catch(() => {});
+}
+
 /**
  * Create the session.* plugin tools bound to a SessionManager instance.
  */
-export function createPluginTools(manager: SessionManager) {
+export function createPluginTools(
+  manager: SessionManager,
+  options?: PluginToolsOptions,
+) {
+  const audit = options?.auditLogger;
   return {
     'session.list': {
       description: 'List active AI CLI sessions on this machine',
@@ -105,7 +139,7 @@ export function createPluginTools(manager: SessionManager) {
           .list({ cwd: params.cwd, provider: params.provider })
           .filter((s) => manager.acl.canAccess(caller.userId, s.id));
 
-        return sessions.map((s) => ({
+        const result = sessions.map((s) => ({
           id: s.id,
           provider: s.provider,
           cwd: s.cwd,
@@ -114,6 +148,11 @@ export function createPluginTools(manager: SessionManager) {
           status: manager.getSwitchState(s.id),
           lastActivity: manager.getLastActivity(s.id),
         }));
+
+        auditLog(audit, caller.userId, 'list', '*', {
+          count: result.length,
+        });
+        return result;
       },
     } satisfies PluginTool<SessionListParams, SessionInfo[]>,
 
@@ -129,6 +168,10 @@ export function createPluginTools(manager: SessionManager) {
           caller.userId,
         );
 
+        auditLog(audit, caller.userId, 'spawn', session.id, {
+          provider: params.provider,
+          cwd: params.cwd,
+        });
         return {
           id: session.id,
           provider: session.provider,
@@ -151,6 +194,7 @@ export function createPluginTools(manager: SessionManager) {
           mode: params.mode ?? 'remote',
         });
 
+        auditLog(audit, caller.userId, 'resume', params.sessionId);
         return {
           id: session.id,
           provider: session.provider,
@@ -178,6 +222,7 @@ export function createPluginTools(manager: SessionManager) {
 
         // Regular input — forward to session
         await session.send(params.input);
+        auditLog(audit, caller.userId, 'send', params.sessionId);
         return { handled: false };
       },
     } satisfies PluginTool<SessionSendParams, { handled: boolean; response?: string }>,
@@ -189,10 +234,12 @@ export function createPluginTools(manager: SessionManager) {
         caller: CallerContext,
       ) => {
         manager.acl.assertOwner(caller.userId, params.sessionId);
-        return manager.readMessages(params.sessionId, {
+        const result = manager.readMessages(params.sessionId, {
           cursor: params.cursor,
           limit: params.limit,
         });
+        auditLog(audit, caller.userId, 'read', params.sessionId);
+        return result;
       },
     } satisfies PluginTool<SessionReadParams, { messages: unknown[]; nextCursor: string }>,
 
@@ -205,6 +252,10 @@ export function createPluginTools(manager: SessionManager) {
         manager.acl.assertOwner(caller.userId, params.sessionId);
         const session = manager.get(params.sessionId);
         await session.respondToPermission(params.requestId, params.approved);
+        auditLog(audit, caller.userId, 'respond', params.sessionId, {
+          requestId: params.requestId,
+          approved: params.approved,
+        });
       },
     } satisfies PluginTool<SessionRespondParams, void>,
 
@@ -216,6 +267,9 @@ export function createPluginTools(manager: SessionManager) {
       ): Promise<void> => {
         manager.acl.assertOwner(caller.userId, params.sessionId);
         await manager.switchMode(params.sessionId, params.mode);
+        auditLog(audit, caller.userId, 'switch', params.sessionId, {
+          mode: params.mode,
+        });
       },
     } satisfies PluginTool<SessionSwitchParams, void>,
 
@@ -227,7 +281,24 @@ export function createPluginTools(manager: SessionManager) {
       ): Promise<void> => {
         manager.acl.assertOwner(caller.userId, params.sessionId);
         await manager.stop(params.sessionId, params.force);
+        auditLog(audit, caller.userId, 'stop', params.sessionId, {
+          force: params.force,
+        });
       },
     } satisfies PluginTool<SessionStopParams, void>,
+
+    'session.summary': {
+      description: 'Get a structured summary of a session (message counts, tools used, files modified, duration)',
+      handler: async (
+        params: SessionSummaryParams,
+        caller: CallerContext,
+      ): Promise<SessionSummary> => {
+        manager.acl.assertOwner(caller.userId, params.sessionId);
+        const { messages } = manager.readMessages(params.sessionId);
+        const summary = summarizeSession(messages);
+        auditLog(audit, caller.userId, 'summary', params.sessionId);
+        return summary;
+      },
+    } satisfies PluginTool<SessionSummaryParams, SessionSummary>,
   };
 }

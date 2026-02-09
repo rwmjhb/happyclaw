@@ -6,6 +6,7 @@
  */
 
 import type { SessionMessage } from '../types/index.js';
+import { redactSensitive } from '../redact.js';
 
 const MAX_LENGTH = 4000;
 const MAX_CHUNKS = 3;
@@ -57,7 +58,7 @@ export function formatForTelegram(messages: SessionMessage[]): string[] {
   let current = '';
 
   for (const msg of messages) {
-    const formatted = formatMessage(msg);
+    const formatted = redactSensitive(formatMessage(msg));
     if (current.length + formatted.length > MAX_LENGTH) {
       if (current) chunks.push(current);
       current = formatted.length > MAX_LENGTH

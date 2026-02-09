@@ -15,6 +15,8 @@ import { createPluginTools } from '../../src/plugin.js';
 import { EventBus } from '../../src/event-bus.js';
 import { parseCommand } from '../../src/commands.js';
 import { formatForTelegram, formatForDiscord } from '../../src/formatters/index.js';
+import { HealthChecker } from '../../src/health.js';
+import { summarizeSession } from '../../src/summary.js';
 import type {
   CallerContext,
   SessionEvent,
@@ -353,6 +355,91 @@ describe('Full-stack integration', () => {
 
       const r2 = manager.readMessages('pag-2');
       expect(r2.messages).toHaveLength(0);
+    });
+  });
+
+  describe('health checker integration', () => {
+    it('auto-cleans dead sessions via health checker', async () => {
+      const alive = createMockSession({ id: 'alive-int', pid: process.pid });
+      const dead = createMockSession({ id: 'dead-int', pid: 999999999 });
+
+      claudeProvider._setNextSession(alive);
+      await manager.spawn('claude', { cwd: '/tmp', mode: 'remote' }, 'alice');
+      claudeProvider._setNextSession(dead);
+      await manager.spawn('claude', { cwd: '/tmp', mode: 'remote' }, 'alice');
+
+      expect(manager.size).toBe(2);
+
+      const checker = new HealthChecker(manager, { intervalMs: 500 });
+      checker.start();
+
+      await vi.advanceTimersByTimeAsync(600);
+
+      // Dead session should be cleaned up
+      expect(manager.size).toBe(1);
+      expect(() => manager.get('alive-int')).not.toThrow();
+      expect(() => manager.get('dead-int')).toThrow(/not found/i);
+
+      checker.stop();
+    });
+  });
+
+  describe('session.summary tool integration', () => {
+    it('returns structured summary via plugin tool', async () => {
+      const cs = createMockSession({ id: 'summary-int' });
+      claudeProvider._setNextSession(cs);
+      await tools['session.spawn'].handler(
+        { provider: 'claude', cwd: '/tmp', mode: 'remote' },
+        alice,
+      );
+
+      // Simulate messages
+      cs._emitMessage({ type: 'text', content: 'Hello', timestamp: 1000 });
+      cs._emitMessage({
+        type: 'tool_use',
+        content: 'Reading file',
+        timestamp: 2000,
+        metadata: { tool: 'Read', file: '/src/main.ts' },
+      });
+      cs._emitMessage({ type: 'result', content: 'Done', timestamp: 5000 });
+
+      const summary = await tools['session.summary'].handler(
+        { sessionId: 'summary-int' },
+        alice,
+      );
+
+      expect(summary.totalMessages).toBe(3);
+      expect(summary.toolsUsed).toContain('Read');
+      expect(summary.filesModified).toContain('/src/main.ts');
+      expect(summary.status).toBe('completed');
+      expect(summary.durationMs).toBe(4000);
+    });
+
+    it('enforces ACL on session.summary', async () => {
+      const cs = createMockSession({ id: 'sum-acl' });
+      claudeProvider._setNextSession(cs);
+      await tools['session.spawn'].handler(
+        { provider: 'claude', cwd: '/tmp', mode: 'remote' },
+        alice,
+      );
+
+      await expect(
+        tools['session.summary'].handler(
+          { sessionId: 'sum-acl' },
+          bob,
+        ),
+      ).rejects.toThrow(/denied|not own/i);
+    });
+  });
+
+  describe('audit logging integration', () => {
+    it('creates plugin tools with audit logger option', () => {
+      // Verify the createPluginTools accepts the auditLogger option
+      const toolsWithAudit = createPluginTools(manager, {
+        auditLogger: undefined,
+      });
+      expect(toolsWithAudit['session.spawn']).toBeDefined();
+      expect(toolsWithAudit['session.summary']).toBeDefined();
     });
   });
 });

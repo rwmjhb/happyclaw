@@ -33,6 +33,7 @@ import type {
 import { SessionACL } from './security/index.js';
 import { CwdWhitelist } from './security/index.js';
 import type { SessionPersistence } from './persistence.js';
+import { redactSensitive } from './redact.js';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -255,12 +256,74 @@ export class SessionManager extends EventEmitter {
 
     const start = Math.max(0, Math.min(cursor, buffer.length));
     const end = Math.min(start + limit, buffer.length);
-    const messages = buffer.slice(start, end);
+    const messages = buffer.slice(start, end).map((msg) => ({
+      ...msg,
+      content: redactSensitive(msg.content),
+    }));
 
     return {
       messages,
       nextCursor: String(end),
     };
+  }
+
+  // -------------------------------------------------------------------------
+  // Retry resume (exponential backoff)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Retry resuming a session with exponential backoff.
+   *
+   * Calls `this.resume()` on each attempt — the session must be tracked
+   * in the sessions map. Emits events on each attempt and on exhaustion.
+   */
+  async retryResume(
+    sessionId: string,
+    options?: { maxRetries?: number; baseDelayMs?: number },
+  ): Promise<ProviderSession> {
+    const maxRetries = options?.maxRetries ?? 3;
+    const baseDelayMs = options?.baseDelayMs ?? 1000;
+
+    const existing = this.sessions.get(sessionId);
+    const mode = existing?.mode ?? 'remote';
+
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      const delay = baseDelayMs * Math.pow(2, attempt);
+
+      this.emit('event', {
+        type: 'error',
+        severity: 'info',
+        sessionId,
+        timestamp: Date.now(),
+        summary: `Retry attempt ${attempt + 1}/${maxRetries} in ${delay}ms...`,
+      } satisfies SessionEvent);
+
+      await sleep(delay);
+
+      try {
+        return await this.resume(sessionId, { mode });
+      } catch (err) {
+        lastError = err;
+      }
+    }
+
+    const message = lastError instanceof Error
+      ? lastError.message
+      : String(lastError);
+
+    this.emit('event', {
+      type: 'error',
+      severity: 'urgent',
+      sessionId,
+      timestamp: Date.now(),
+      summary: `All ${maxRetries} retry attempts exhausted: ${message}`,
+    } satisfies SessionEvent);
+
+    throw new Error(
+      `Failed to resume session ${sessionId} after ${maxRetries} retries: ${message}`,
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -541,6 +604,11 @@ export class SessionManager extends EventEmitter {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** Sleep for the specified duration. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 /** Race a promise against a timeout. Rejects with TimeoutError on expiry. */
 function withTimeout<T>(
