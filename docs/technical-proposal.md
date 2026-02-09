@@ -1,4 +1,4 @@
-# HappyClaw 技术方案
+# HappyClaw 技术方案 v2
 
 > OpenClaw PTY Bridge Plugin — 将本机 Claude Code / Codex / Gemini CLI session 桥接到 OpenClaw
 
@@ -19,323 +19,598 @@
 
 构建一个 OpenClaw Plugin，将本机运行中的 AI CLI session 桥接到 OpenClaw 的消息系统，实现：
 
-1. **Session 发现** — 自动检测本机活跃的 `claude`/`codex`/`gemini` 进程
-2. **PTY 附着** — 附着到运行中进程的 PTY，捕获 I/O
-3. **远程控制** — 通过 Telegram/Discord 发送输入、接收格式化输出
-4. **控制权切换** — 本地/远程无缝切换，避免双方同时操作冲突
-5. **事件推送** — 权限确认请求、错误、任务完成等关键事件主动推送
+1. **Session 管理** — 启动、恢复、停止 `claude`/`codex`/`gemini` session
+2. **远程交互** — 通过 Telegram/Discord 发送指令、接收结构化输出
+3. **事件推送** — 权限确认请求、错误、任务完成等关键事件主动推送
+4. **模式切换** — 本地原生体验 / 远程控制模式无缝切换
+5. **多工具支持** — Claude Code、Codex、Gemini CLI 按各自最优方式桥接
 
 ### 1.3 参考项目
 
-[Happy Coder](https://github.com/slopus/happy)（MIT 协议）—— 一个实现了类似功能的开源项目。HappyClaw 借鉴其以下设计：
-
-- Daemon + Session 管理架构
-- Agent Runner 的进程管理模式
-- RPC 桥接协议设计
-- 控制权切换机制
+[Happy Coder](https://github.com/slopus/happy)（MIT 协议）—— 实现了类似功能的开源项目。
 
 ## 2. Happy Coder 架构分析
 
-### 2.1 整体架构
+### 2.1 核心发现：不是 PTY 桥接，而是 SDK 模式切换
 
-```
-手机 App ←——Socket.IO + E2E 加密——→ Happy Server ←——Socket.IO——→ Happy CLI Daemon
-                                    (Postgres/Redis/S3)           (本机后台进程)
-                                                                    ├── Session 1 (claude)
-                                                                    ├── Session 2 (codex)
-                                                                    └── Session N (gemini)
-```
+深入分析 Happy Coder 源码后发现，它**没有使用 PTY 捕获终端输出**。实际实现是：
 
-### 2.2 CLI 核心组件
+**本地模式（claudeLocal.ts）**：
 
-| 组件 | 源码位置 | 职责 |
-|------|---------|------|
-| Entry Point | `src/index.ts` | CLI 路由，子命令分发 |
-| Daemon | `src/daemon/run.ts` | 后台进程，管理多 session |
-| Control Server | `src/daemon/controlServer.ts` | 本地 IPC HTTP 服务 (127.0.0.1) |
-| Control Client | `src/daemon/controlClient.ts` | CLI 与 daemon 通信 |
-| Claude Runner | `src/claude/runClaude.ts` | Claude Code 进程管理 |
-| Codex Runner | `src/codex/runCodex.ts` | Codex 进程管理 |
-| Gemini Runner | `src/gemini/runGemini.ts` | Gemini CLI 进程管理 |
-| API Client | `src/api/` | HTTP + Socket.IO + 加密 |
-| Persistence | `src/persistence.ts` | 本地状态管理 (~/.happy/) |
-
-### 2.3 关键机制
-
-#### Daemon 生命周期
-
-```
-startDaemon() → 校验版本 → 获取锁文件 → 认证 → 注册 machine → 启动控制服务 → 跟踪子 session → 同步状态
+```typescript
+// stdio 直接继承给用户终端，和直接跑 claude 完全一样
+const child = spawn('node', [claudeCliPath, ...args], {
+  stdio: ['inherit', 'inherit', 'inherit', 'pipe'],  // fd3 用于追踪 thinking 状态
+  cwd: opts.path,
+});
 ```
 
-#### 控制服务 API
+**远程模式（claudeRemote.ts）**：
 
-Daemon 在 `127.0.0.1:port` 暴露 HTTP 接口：
+```typescript
+// 使用 Claude Code SDK，结构化 JSON 流交互
+const response = query({
+  prompt: messages,  // AsyncIterable<SDKUserMessage>
+  options: {
+    cwd: opts.path,
+    resume: startFrom,  // 恢复已有会话
+    // --output-format stream-json
+    // --input-format stream-json
+    // --permission-prompt-tool stdio
+  },
+});
 
-- `GET /list` — 列出活跃 session
-- `POST /spawn-session` — 启动新 session
-- `POST /stop-session` — 停止 session
-- `POST /stop` — 关闭 daemon
-- `POST /session-started` — session 自报告
-
-#### RPC 桥接
-
+for await (const message of response) {
+  // message.type: 'system' | 'assistant' | 'user' | 'result'
+  onMessage(message);  // 结构化数据，无需解析终端输出
+}
 ```
-手机 → Server (Socket.IO) → Daemon → Session 子进程
+
+**模式切换（loop.ts）**：
+
+```typescript
+while (true) {
+  switch (mode) {
+    case 'local':
+      const result = await claudeLocalLauncher(session);
+      if (result.type === 'switch') mode = 'remote';  // 终止本地进程
+      break;
+    case 'remote':
+      const reason = await claudeRemoteLauncher(session);
+      if (reason === 'switch') mode = 'local';  // 终止远程进程
+      break;
+  }
+  // 切换时用 --resume <sessionId> 恢复同一个会话
+}
 ```
 
-Session 注册 RPC handlers：
-- `bash` — 执行 shell 命令
-- `file read/write` — 文件操作
-- `ripgrep` — 代码搜索
-- `difftastic` — diff 查看
+### 2.2 Happy Coder 的关键设计决策
 
-#### 加密方案
+| 维度 | 设计 | 说明 |
+|------|------|------|
+| Claude Code 远程交互 | Claude Code SDK | `--output-format stream-json` 结构化输出 |
+| 权限处理 | SDK control_request/response | 不是解析 "Allow (y/n)"，而是 SDK 原生协议 |
+| Slash 命令 | 拦截转换 | `/compact` `/clear` 在 parsers/specialCommands.ts 中拦截 |
+| Codex 远程交互 | MCP 桥接 | codexMcpClient.ts + happyMcpStdioBridge.ts |
+| 本地体验 | stdio inherit | 和直接跑 CLI 完全一样 |
+| 模式切换 | 终止 + resume | 切换时杀进程，用 `--resume` 在新模式恢复 |
 
-- Legacy: NaCl secretbox (XSalsa20-Poly1305)
-- DataKey: AES-256-GCM（每 session 独立 key）
-- Server 只存储 opaque blobs，无法解密用户内容
+### 2.3 OpenClaw 已有能力对比
 
-### 2.4 OpenClaw 已有能力对比
-
-| 能力 | Happy | OpenClaw | 差距 |
-|------|-------|----------|------|
+| 能力 | Happy Coder | OpenClaw | 差距 |
+|------|-------------|----------|------|
 | 后台进程管理 | Daemon | Gateway | ✅ 已有 |
 | Session 系统 | Session Map | Session 管理 | ✅ 已有 |
 | 消息路由 | Socket.IO → App | Telegram/Discord | ✅ 已有 |
 | 工具调用 | RPC handlers | exec/read/write tools | ✅ 已有 |
 | 加密传输 | E2E AES-256-GCM | 本地运行不需要 | N/A |
-| **PTY 进程管理** | Agent Runners | coding-agent skill（spawn 模式） | ⚠️ 缺 attach 模式 |
-| **控制权切换** | 键盘接管 | 无 | ❌ 缺失 |
-| **CLI 输出解析** | 内置 parser | 无 | ❌ 缺失 |
+| **SDK 模式交互** | Claude SDK + MCP | 无 | ❌ 缺失 |
+| **模式切换** | local/remote loop | 无 | ❌ 缺失 |
+| **事件推送** | SDK 消息监听 | 无 | ❌ 缺失 |
 
-**结论：OpenClaw 缺的是 PTY attach + 控制权切换 + 输出解析这三块。**
+**结论：OpenClaw 缺的是 SDK/CLI 桥接层 + 模式切换 + 事件推送。**
 
 ## 3. HappyClaw 架构设计
 
-### 3.1 总体架构
+### 3.1 设计原则
+
+基于 Happy Coder 源码分析和团队讨论，确定以下原则：
+
+1. **SDK 优先**：对有 SDK 支持的工具（Claude Code），使用 SDK 结构化交互，不做脆弱的终端文本解析
+2. **PTY 兜底**：对没有 SDK 的工具（Gemini 等），使用 PTY 桥接作为通用后备
+3. **统一抽象**：上层 Plugin tools 不感知底层是 SDK 还是 PTY，通过 Provider 接口统一
+4. **本地原生**：本地模式下 stdio inherit，和直接用 CLI 完全一样
+
+### 3.2 总体架构
 
 ```
-┌─────────────────────────────────────────────────┐
-│                 OpenClaw Gateway                 │
-│                                                  │
-│  ┌──────────────┐    ┌───────────────────────┐  │
-│  │  Main Agent   │    │  pty-bridge plugin     │  │
-│  │  (马斯克等)    │◄──►│                        │  │
-│  └──────────────┘    │  ┌──────────────────┐  │  │
-│                      │  │  Session Manager  │  │  │
-│                      │  │  ├── discover()   │  │  │
-│                      │  │  ├── attach()     │  │  │
-│                      │  │  ├── send()       │  │  │
-│                      │  │  ├── read()       │  │  │
-│                      │  │  └── detach()     │  │  │
-│                      │  └──────────────────┘  │  │
-│                      │  ┌──────────────────┐  │  │
-│                      │  │  Output Parser    │  │  │
-│                      │  │  ├── claude       │  │  │
-│                      │  │  ├── codex        │  │  │
-│                      │  │  └── gemini       │  │  │
-│                      │  └──────────────────┘  │  │
-│                      │  ┌──────────────────┐  │  │
-│                      │  │  Event Detector   │  │  │
-│                      │  │  ├── permission?  │  │  │
-│                      │  │  ├── error?       │  │  │
-│                      │  │  ├── waiting?     │  │  │
-│                      │  │  └── done?        │  │  │
-│                      │  └──────────────────┘  │  │
-│                      └───────────────────────┘  │
-│                                                  │
-│  Telegram ◄──── 消息路由 ────► Discord           │
-└─────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│                  OpenClaw Gateway                     │
+│                                                       │
+│  ┌──────────────┐    ┌────────────────────────────┐  │
+│  │  Main Agent   │    │    pty-bridge plugin        │  │
+│  │  (马斯克等)    │◄──►│                             │  │
+│  └──────────────┘    │  ┌────────────────────────┐ │  │
+│                      │  │   Plugin Tools Layer    │ │  │
+│                      │  │   pty.list / pty.spawn  │ │  │
+│                      │  │   pty.send / pty.read   │ │  │
+│                      │  │   pty.stop / pty.resume │ │  │
+│                      │  └──────────┬─────────────┘ │  │
+│                      │             │                │  │
+│                      │  ┌──────────▼─────────────┐ │  │
+│                      │  │   Session Manager       │ │  │
+│                      │  │   (统一管理所有 session)  │ │  │
+│                      │  └──────────┬─────────────┘ │  │
+│                      │             │                │  │
+│                      │  ┌──────────▼─────────────┐ │  │
+│                      │  │   Provider Layer        │ │  │
+│                      │  │   ┌──────────────────┐  │ │  │
+│                      │  │   │ ClaudeSDKProvider │  │ │  │
+│                      │  │   │ (SDK stream-json) │  │ │  │
+│                      │  │   └──────────────────┘  │ │  │
+│                      │  │   ┌──────────────────┐  │ │  │
+│                      │  │   │ CodexMCPProvider  │  │ │  │
+│                      │  │   │ (MCP bridge)      │  │ │  │
+│                      │  │   └──────────────────┘  │ │  │
+│                      │  │   ┌──────────────────┐  │ │  │
+│                      │  │   │ GenericPTYProvider│  │ │  │
+│                      │  │   │ (PTY fallback)    │  │ │  │
+│                      │  │   └──────────────────┘  │ │  │
+│                      │  └────────────────────────┘ │  │
+│                      └────────────────────────────┘  │
+│                                                       │
+│  Telegram ◄──── 消息路由 ────► Discord                │
+└──────────────────────────────────────────────────────┘
          │
          ▼
-  ┌──────────────────┐
-  │  本机 CLI 进程     │
-  │  ├── claude (PTY) │
-  │  ├── codex  (PTY) │
-  │  └── gemini (PTY) │
-  └──────────────────┘
+  ┌──────────────────────┐
+  │  本机 CLI 进程          │
+  │  ├── claude (SDK/PTY) │
+  │  ├── codex  (MCP)     │
+  │  └── gemini (PTY)     │
+  └──────────────────────┘
 ```
 
-### 3.2 核心模块
+### 3.3 核心模块
 
-#### 3.2.1 Session Manager
+#### 3.3.1 Provider 接口（统一抽象层）
 
-负责 CLI 进程的生命周期管理。
-
-```typescript
-interface PTYSession {
-  id: string;
-  pid: number;
-  provider: 'claude' | 'codex' | 'gemini';
-  cwd: string;              // 项目目录
-  startedAt: number;
-  controlMode: 'local' | 'remote' | 'shared';
-  pty: IPty;                // node-pty 实例
-  outputBuffer: RingBuffer; // 最近输出缓冲
-}
-
-interface SessionManager {
-  // 发现本机活跃的 AI CLI 进程
-  discover(): Promise<DiscoveredProcess[]>;
-
-  // 启动新的 CLI session 并管理
-  spawn(provider: string, cwd: string, args?: string[]): Promise<PTYSession>;
-
-  // 附着到已有进程（核心难点）
-  attach(pid: number): Promise<PTYSession>;
-
-  // 向 session 发送输入
-  send(sessionId: string, input: string): Promise<void>;
-
-  // 读取最近输出
-  read(sessionId: string, lines?: number): Promise<string>;
-
-  // 脱离但不关闭进程
-  detach(sessionId: string): Promise<void>;
-
-  // 列出所有管理中的 session
-  list(): PTYSession[];
-}
-```
-
-#### 3.2.2 Output Parser
-
-解析不同 CLI 的终端输出，提取结构化信息。
+所有 CLI 工具的桥接方式统一为一个 Provider 接口，上层无需关心底层实现。
 
 ```typescript
-interface ParsedOutput {
-  type: 'text' | 'code' | 'tool_use' | 'permission_request' | 'error' | 'thinking' | 'done';
+/** Provider 支持的交互模式 */
+type SessionMode = 'local' | 'remote';
+
+/** 结构化消息（SDK 原生提供 / PTY 解析后提供） */
+interface SessionMessage {
+  type: 'text' | 'code' | 'tool_use' | 'tool_result' | 'thinking' | 'error' | 'result';
   content: string;
   metadata?: {
-    tool?: string;         // 使用的工具名
-    file?: string;         // 涉及的文件
-    language?: string;     // 代码语言
-    permission?: string;   // 请求的权限
+    tool?: string;
+    file?: string;
+    language?: string;
   };
 }
 
-interface OutputParser {
-  parse(raw: string, provider: string): ParsedOutput[];
-  // 流式解析（增量输入）
-  createStream(provider: string): Transform;
-}
-```
-
-#### 3.2.3 Event Detector
-
-监控输出流，检测关键事件并触发通知。
-
-```typescript
-interface DetectedEvent {
-  type: 'permission_request' | 'error' | 'waiting_for_input' | 'task_complete' | 'tool_execution';
+/** 会话事件 */
+interface SessionEvent {
+  type: 'permission_request' | 'error' | 'waiting_for_input' | 'task_complete' | 'ready';
   severity: 'info' | 'warning' | 'urgent';
   summary: string;
   sessionId: string;
   timestamp: number;
+  /** 权限请求的详细信息（SDK 模式下可提供精确的工具名和参数） */
+  permissionDetail?: {
+    toolName: string;
+    input: unknown;
+  };
 }
 
-interface EventDetector {
-  // 注册事件监听器
-  on(event: string, handler: (event: DetectedEvent) => void): void;
-  // 输入新的输出内容进行检测
-  feed(sessionId: string, output: string): void;
+/** 统一的 Provider 接口 */
+interface SessionProvider {
+  readonly name: string;  // 'claude' | 'codex' | 'gemini'
+  readonly supportedModes: SessionMode[];
+
+  /** 启动新 session */
+  spawn(options: SpawnOptions): Promise<ProviderSession>;
+
+  /** 恢复已有 session */
+  resume(sessionId: string, options: SpawnOptions): Promise<ProviderSession>;
+}
+
+interface SpawnOptions {
+  cwd: string;
+  mode: SessionMode;
+  args?: string[];
+}
+
+/** Provider 创建的 session 实例 */
+interface ProviderSession {
+  readonly id: string;
+  readonly provider: string;
+  readonly cwd: string;
+  readonly pid: number;
+  mode: SessionMode;
+
+  /** 发送用户输入 */
+  send(input: string): Promise<void>;
+
+  /** 读取最近消息 */
+  read(limit?: number): Promise<SessionMessage[]>;
+
+  /** 切换模式（local ↔ remote） */
+  switchMode(target: SessionMode): Promise<void>;
+
+  /** 回复权限请求 */
+  respondToPermission(requestId: string, approved: boolean): Promise<void>;
+
+  /** 停止 session */
+  stop(force?: boolean): Promise<void>;
+
+  /** 事件监听 */
+  onEvent(handler: (event: SessionEvent) => void): void;
+
+  /** 消息监听（远程模式下的实时消息流） */
+  onMessage(handler: (message: SessionMessage) => void): void;
 }
 ```
 
-#### 3.2.4 控制权管理
+#### 3.3.2 ClaudeSDKProvider
+
+Claude Code 的首选桥接方式，使用官方 SDK 进行结构化交互。
 
 ```typescript
-type ControlMode = 'local' | 'remote' | 'shared';
+class ClaudeSDKProvider implements SessionProvider {
+  readonly name = 'claude';
+  readonly supportedModes: SessionMode[] = ['local', 'remote'];
 
-interface ControlManager {
-  // 获取当前控制模式
-  getMode(sessionId: string): ControlMode;
+  async spawn(options: SpawnOptions): Promise<ProviderSession> {
+    if (options.mode === 'local') {
+      // 本地模式：stdio inherit，原生体验
+      return new ClaudeLocalSession(options);
+    } else {
+      // 远程模式：SDK stream-json
+      return new ClaudeRemoteSession(options);
+    }
+  }
 
-  // 请求远程控制权
-  requestRemote(sessionId: string): Promise<boolean>;
-
-  // 释放远程控制权（回到本地）
-  releaseToLocal(sessionId: string): Promise<void>;
-
-  // 本地键盘活动检测（如果可能）
-  onLocalActivity(sessionId: string, callback: () => void): void;
+  async resume(sessionId: string, options: SpawnOptions): Promise<ProviderSession> {
+    // 使用 --resume <sessionId> 恢复会话
+    return this.spawn({ ...options, args: [...(options.args || []), '--resume', sessionId] });
+  }
 }
 ```
 
-### 3.3 OpenClaw Plugin 接口
-
-作为 OpenClaw Plugin 暴露的 tools：
+**本地模式（ClaudeLocalSession）**：
 
 ```typescript
-// Plugin 注册的 tools
+class ClaudeLocalSession implements ProviderSession {
+  private child: ChildProcess;
+
+  constructor(options: SpawnOptions) {
+    // 和直接跑 claude 完全一样
+    this.child = spawn('claude', options.args || [], {
+      stdio: ['inherit', 'inherit', 'inherit', 'pipe'],  // fd3 追踪状态
+      cwd: options.cwd,
+    });
+  }
+
+  async switchMode(target: SessionMode): Promise<void> {
+    if (target === 'remote') {
+      // 终止本地进程，返回 session ID 供远程模式 resume
+      this.child.kill('SIGTERM');
+    }
+  }
+  // ...
+}
+```
+
+**远程模式（ClaudeRemoteSession）**：
+
+```typescript
+class ClaudeRemoteSession implements ProviderSession {
+  private query: Query;  // Claude Code SDK Query 实例
+  private messages: PushableAsyncIterable<SDKUserMessage>;
+
+  constructor(options: SpawnOptions) {
+    this.messages = new PushableAsyncIterable();
+    this.query = query({
+      prompt: this.messages,
+      options: {
+        cwd: options.cwd,
+        resume: options.resumeSessionId,
+        permissionMode: 'default',
+        canCallTool: (toolName, input, opts) => this.handlePermission(toolName, input, opts),
+      },
+    });
+    this.startListening();
+  }
+
+  async send(input: string): Promise<void> {
+    // 结构化输入，不是 PTY 文本
+    this.messages.push({
+      type: 'user',
+      message: { role: 'user', content: input },
+    });
+  }
+
+  private async startListening(): Promise<void> {
+    for await (const message of this.query) {
+      // SDK 输出已是结构化数据
+      if (message.type === 'assistant') {
+        this.emitMessage(this.convertSDKMessage(message));
+      }
+      if (message.type === 'result') {
+        this.emitEvent({ type: 'task_complete', ... });
+      }
+    }
+  }
+
+  private async handlePermission(toolName: string, input: unknown, opts: { signal: AbortSignal }): Promise<PermissionResult> {
+    // 推送权限请求给远程用户，等待回复
+    this.emitEvent({
+      type: 'permission_request',
+      severity: 'urgent',
+      summary: `Claude 想要使用 ${toolName}`,
+      permissionDetail: { toolName, input },
+    });
+    return this.waitForPermissionResponse(opts.signal);
+  }
+}
+```
+
+#### 3.3.3 GenericPTYProvider
+
+通用的 PTY 桥接方案，用于没有专用 SDK 的 CLI 工具。
+
+```typescript
+class GenericPTYProvider implements SessionProvider {
+  readonly name: string;
+  readonly supportedModes: SessionMode[] = ['local', 'remote'];
+
+  constructor(
+    name: string,
+    private cliPath: string,
+    private parserRules: ParserRuleSet,  // 可配置的解析规则
+  ) {
+    this.name = name;
+  }
+
+  async spawn(options: SpawnOptions): Promise<ProviderSession> {
+    if (options.mode === 'local') {
+      // 本地模式：stdio inherit
+      return new PTYLocalSession(this.cliPath, options);
+    } else {
+      // 远程模式：node-pty 捕获 I/O + 解析
+      return new PTYRemoteSession(this.cliPath, options, this.parserRules);
+    }
+  }
+}
+```
+
+**PTY 远程模式下的输出解析**：
+
+```typescript
+class PTYRemoteSession implements ProviderSession {
+  private pty: IPty;
+  private terminal: Terminal;  // xterm-headless 终端模拟器
+  private outputBuffer: SessionMessage[] = [];
+
+  constructor(cliPath: string, options: SpawnOptions, private rules: ParserRuleSet) {
+    this.pty = spawn(cliPath, options.args || [], {
+      cwd: options.cwd,
+      cols: 200,  // 宽终端减少换行
+      rows: 50,
+    });
+    this.terminal = new Terminal({ cols: 200, rows: 50 });
+
+    this.pty.onData((data) => {
+      this.terminal.write(data);
+      this.parseAndEmit(data);
+    });
+  }
+
+  private parseAndEmit(raw: string): void {
+    const clean = stripAnsi(raw);
+    const parsed = this.rules.parse(clean);
+    if (parsed) {
+      this.outputBuffer.push(parsed);
+      this.emitMessage(parsed);
+    }
+
+    // 基于规则检测事件
+    const event = this.rules.detectEvent(clean);
+    if (event) {
+      this.emitEvent(event);
+    }
+  }
+}
+```
+
+#### 3.3.4 Session Manager
+
+统一管理所有 Provider 创建的 session。
+
+```typescript
+class SessionManager {
+  private sessions = new Map<string, ProviderSession>();
+  private providers = new Map<string, SessionProvider>();
+
+  registerProvider(provider: SessionProvider): void {
+    this.providers.set(provider.name, provider);
+  }
+
+  async spawn(providerName: string, options: SpawnOptions): Promise<ProviderSession> {
+    const provider = this.providers.get(providerName);
+    if (!provider) throw new Error(`Unknown provider: ${providerName}`);
+
+    const session = await provider.spawn(options);
+    this.sessions.set(session.id, session);
+
+    // 监听事件，转发给 OpenClaw 消息系统
+    session.onEvent((event) => this.forwardEvent(event));
+    session.onMessage((msg) => this.bufferMessage(session.id, msg));
+
+    return session;
+  }
+
+  list(filter?: { cwd?: string; provider?: string }): ProviderSession[] {
+    let results = Array.from(this.sessions.values());
+    if (filter?.cwd) results = results.filter(s => s.cwd === filter.cwd);
+    if (filter?.provider) results = results.filter(s => s.provider === filter.provider);
+    return results;
+  }
+
+  async switchMode(sessionId: string, target: SessionMode): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error(`Session not found: ${sessionId}`);
+
+    // 切换模式：终止当前进程 → resume 新模式
+    const oldSession = session;
+    const provider = this.providers.get(session.provider)!;
+
+    await oldSession.stop();
+    const newSession = await provider.resume(sessionId, {
+      cwd: oldSession.cwd,
+      mode: target,
+    });
+
+    this.sessions.set(sessionId, newSession);
+    newSession.onEvent((event) => this.forwardEvent(event));
+    newSession.onMessage((msg) => this.bufferMessage(sessionId, msg));
+  }
+}
+```
+
+### 3.4 OpenClaw Plugin 接口
+
+```typescript
 const tools = {
-  // 列出可用的 CLI sessions
   'pty.list': {
     description: '列出本机活跃的 AI CLI sessions',
-    parameters: {},
-    handler: async () => sessionManager.list()
+    parameters: {
+      cwd: { type: 'string', description: '按项目目录过滤', optional: true },
+      provider: { type: 'string', enum: ['claude', 'codex', 'gemini'], optional: true }
+    },
+    handler: async ({ cwd, provider }) => {
+      const sessions = sessionManager.list({ cwd, provider });
+      return sessions.map(s => ({
+        id: s.id,
+        provider: s.provider,
+        cwd: s.cwd,
+        mode: s.mode,
+        pid: s.pid,
+      }));
+    }
   },
 
-  // 发现未管理的 CLI 进程
-  'pty.discover': {
-    description: '扫描本机运行中的 claude/codex/gemini 进程',
-    parameters: {},
-    handler: async () => sessionManager.discover()
-  },
-
-  // 启动新 session
   'pty.spawn': {
     description: '启动新的 AI CLI session',
     parameters: {
       provider: { type: 'string', enum: ['claude', 'codex', 'gemini'] },
       cwd: { type: 'string', description: '项目目录' },
-      args: { type: 'array', items: { type: 'string' }, optional: true }
+      mode: { type: 'string', enum: ['local', 'remote'], default: 'local' }
     },
-    handler: async ({ provider, cwd, args }) => sessionManager.spawn(provider, cwd, args)
+    handler: async ({ provider, cwd, mode }) => sessionManager.spawn(provider, { cwd, mode })
   },
 
-  // 附着到已有 session
-  'pty.attach': {
-    description: '附着到运行中的 CLI 进程',
+  'pty.resume': {
+    description: '恢复已有的 CLI session（使用 --resume 加载会话历史）',
     parameters: {
-      target: { type: 'string', description: 'PID 或 session ID' }
+      sessionId: { type: 'string' },
+      mode: { type: 'string', enum: ['local', 'remote'], default: 'remote' }
     },
-    handler: async ({ target }) => sessionManager.attach(target)
+    handler: async ({ sessionId, mode }) => sessionManager.resume(sessionId, { mode })
   },
 
-  // 发送输入
   'pty.send': {
     description: '向 CLI session 发送输入',
     parameters: {
       sessionId: { type: 'string' },
       input: { type: 'string' }
     },
-    handler: async ({ sessionId, input }) => sessionManager.send(sessionId, input)
+    handler: async ({ sessionId, input }) => {
+      const session = sessionManager.get(sessionId);
+      await session.send(input);
+    }
   },
 
-  // 读取输出
   'pty.read': {
     description: '读取 CLI session 最近输出',
     parameters: {
       sessionId: { type: 'string' },
-      lines: { type: 'number', optional: true, default: 50 }
+      limit: { type: 'number', optional: true, default: 50 }
     },
-    handler: async ({ sessionId, lines }) => sessionManager.read(sessionId, lines)
+    handler: async ({ sessionId, limit }) => {
+      const session = sessionManager.get(sessionId);
+      return session.read(limit);
+    }
   },
 
-  // 脱离 session
-  'pty.detach': {
-    description: '脱离 CLI session（不关闭进程）',
+  'pty.respond': {
+    description: '回复权限确认请求',
     parameters: {
-      sessionId: { type: 'string' }
+      sessionId: { type: 'string' },
+      requestId: { type: 'string' },
+      approved: { type: 'boolean' }
     },
-    handler: async ({ sessionId }) => sessionManager.detach(sessionId)
+    handler: async ({ sessionId, requestId, approved }) => {
+      const session = sessionManager.get(sessionId);
+      await session.respondToPermission(requestId, approved);
+    }
+  },
+
+  'pty.switch': {
+    description: '切换 session 的本地/远程模式',
+    parameters: {
+      sessionId: { type: 'string' },
+      mode: { type: 'string', enum: ['local', 'remote'] }
+    },
+    handler: async ({ sessionId, mode }) => sessionManager.switchMode(sessionId, mode)
+  },
+
+  'pty.stop': {
+    description: '停止 CLI session',
+    parameters: {
+      sessionId: { type: 'string' },
+      force: { type: 'boolean', optional: true, default: false }
+    },
+    handler: async ({ sessionId, force }) => {
+      const session = sessionManager.get(sessionId);
+      await session.stop(force);
+    }
   }
 };
 ```
 
-### 3.4 Agent MEMORY.md 配置示例
+### 3.5 多 Session 选择机制
+
+同一个项目目录下可能同时存在多个 session，Agent 引导用户选择。
+
+**Agent 行为规则**：
+
+- `pty.list` 按 `cwd` 过滤后只有 **1 个 session** → 直接操作
+- 有 **多个 session** → 列出摘要（provider、运行时长、当前状态），让用户选择
+- 用户指定了 provider（如"看看 codex"）→ 先按 provider 过滤，仍多个才问
+- 当前目录 **没有 session** → 提示用户是否要 spawn 新的
+
+**典型交互**：
+
+```
+用户（Discord）: "看看 claude 跑到哪了"
+
+Agent 调用: pty.list({ cwd: "~/projects/my-app" })
+→ 返回 1 个 claude session
+
+Agent 调用: pty.read(sessionId)
+→ 返回结构化消息列表
+
+Agent: Claude 正在实现用户认证模块：
+  - ✅ 已完成 src/auth/service.ts
+  - 🔧 正在编辑 src/auth/routes.ts
+```
+
+### 3.6 Agent MEMORY.md 配置示例
 
 ```markdown
 ## PTY Bridge
@@ -344,245 +619,311 @@ const tools = {
 
 ### 使用方式
 
-1. 发现进程：使用 `pty.discover` 工具扫描本机运行中的 AI CLI 进程
-2. 附着：使用 `pty.attach` 附着到目标进程
+1. 查看 session：使用 `pty.list` 列出活跃 session（可按 cwd 和 provider 过滤）
+2. 多个 session 时：展示列表让用户选择，单个时直接操作
 3. 交互：使用 `pty.send` 发送输入，`pty.read` 读取输出
-4. 脱离：使用 `pty.detach` 脱离（进程继续运行）
+4. 权限确认：收到 permission_request 事件时，使用 `pty.respond` 回复
+5. 停止：使用 `pty.stop` 停止 session
 
 ### 事件通知
 
 插件会自动检测并推送：
-- 🔐 权限确认请求（需要用户回复 y/n）
-- ❌ 错误和异常
-- ⏳ AI 等待输入
-- ✅ 任务完成
+- 权限确认请求（需要用户回复）
+- 错误和异常
+- AI 等待输入
+- 任务完成
 ```
 
-## 4. 技术难点与方案
+## 4. 技术方案详解
 
-### 4.1 PTY 附着到已有进程
+### 4.1 Claude Code：SDK 模式
 
-**问题**：Linux/macOS 不允许直接附着到另一个进程的 PTY。
+**方案**：使用 Claude Code 官方 SDK（`@anthropic-ai/claude-code` 或直接调用 CLI 的 stream-json 模式）。
 
-**方案选择**：
-
-| 方案 | 可行性 | 复杂度 | 推荐 |
-|------|--------|--------|------|
-| A. `reptyr` / `nattach` 工具 | Linux only，macOS 不支持 | 低 | ❌ |
-| B. 从 HappyClaw 启动（spawn 模式） | 完全可行 | 低 | ✅ 推荐 |
-| C. tmux/screen 预包装 | 需要用户改习惯 | 中 | ⚠️ 备选 |
-| D. `dtach` 包装 | 轻量，跨平台 | 中 | ⚠️ 备选 |
-| E. Claude Code `--continue` + spawn | 非真正接管，但上下文延续 | 低 | ✅ 兜底 |
-
-**推荐策略：双轨并行**
-
-1. **主路径（spawn 模式）**：通过 HappyClaw 启动 CLI，从一开始就管理 PTY
-2. **兜底路径（continue 模式）**：对已有 session，用 `claude --continue` 在新 PTY 中恢复上下文
+**本地模式**：
 
 ```typescript
-// 主路径：由 HappyClaw 启动
-async spawn(provider: string, cwd: string): Promise<PTYSession> {
-  const pty = spawn(getCliPath(provider), [], { cwd, cols: 120, rows: 40 });
-  return trackSession(pty, provider, cwd);
-}
+// stdio inherit — 用户在本地终端直接和 Claude Code 交互
+const child = spawn('claude', args, {
+  stdio: ['inherit', 'inherit', 'inherit', 'pipe'],
+  cwd,
+});
 
-// 兜底路径：恢复已有 session 的上下文
-async resume(provider: string, cwd: string): Promise<PTYSession> {
-  const args = provider === 'claude' ? ['--continue'] : [];
-  const pty = spawn(getCliPath(provider), args, { cwd, cols: 120, rows: 40 });
-  return trackSession(pty, provider, cwd);
-}
-```
-
-### 4.2 终端输出解析
-
-**问题**：CLI 输出包含 ANSI 转义码、颜色、光标移动、进度条等，直接转发不可读。
-
-**方案**：
-
-```typescript
-import stripAnsi from 'strip-ansi';
-
-function parseOutput(raw: string, provider: string): ParsedOutput[] {
-  const clean = stripAnsi(raw);
-
-  // Claude Code 特有模式
-  if (provider === 'claude') {
-    // 检测权限请求
-    if (clean.includes('Allow') && clean.includes('(y/n)')) {
-      return [{ type: 'permission_request', content: clean }];
-    }
-    // 检测工具使用
-    if (clean.match(/^[⚡🔧📝] /)) {
-      return [{ type: 'tool_use', content: clean }];
-    }
-    // 检测思考中
-    if (clean.includes('Thinking...') || clean.includes('⏳')) {
-      return [{ type: 'thinking', content: clean }];
-    }
-  }
-
-  return [{ type: 'text', content: clean }];
-}
-```
-
-### 4.3 控制权冲突
-
-**问题**：本地终端和远程同时输入会产生冲突。
-
-**方案**：
-
-1. **互斥模式**（默认）：一方控制时，另一方只读
-2. **共享模式**（可选）：两方都可输入，但有冲突风险
-3. **检测本地活动**：监听本地键盘输入，自动切换控制权
-
-```typescript
-// 控制权状态机
-enum ControlState {
-  LOCAL,           // 本地控制中
-  REMOTE,          // 远程控制中
-  TRANSITIONING,   // 切换中
-}
-
-// 本地活动检测（通过 PTY 的 input 事件）
-pty.onData((data) => {
-  if (controlState === ControlState.REMOTE) {
-    // 本地有键盘输入，自动切回本地控制
-    controlState = ControlState.LOCAL;
-    notifyRemote('控制权已切回本地终端');
-  }
+// fd3 管道追踪 thinking 状态
+child.stdio[3].on('data', (data) => {
+  const msg = JSON.parse(data);
+  if (msg.type === 'fetch-start') emitEvent({ type: 'thinking' });
+  if (msg.type === 'fetch-end') emitEvent({ type: 'ready' });
 });
 ```
 
-### 4.4 输出缓冲与截断
-
-**问题**：AI 输出可能很长（大段代码），Telegram 消息有长度限制。
-
-**方案**：
+**远程模式**：
 
 ```typescript
-const MAX_MESSAGE_LENGTH = 4000; // Telegram 限制
+// SDK stream-json — 结构化交互
+const response = query({
+  prompt: userMessages,
+  options: {
+    cwd,
+    resume: sessionId,
+    canCallTool: async (toolName, input, { signal }) => {
+      // 推送权限请求给远程用户
+      emitEvent({
+        type: 'permission_request',
+        permissionDetail: { toolName, input },
+      });
+      // 等待远程用户回复
+      return waitForResponse(signal);
+    },
+  },
+});
+```
 
-function formatForMessaging(output: string): string[] {
-  // 1. 去除 ANSI 码
-  const clean = stripAnsi(output);
+**权限处理**（SDK 原生协议，不需要解析文本）：
 
-  // 2. 智能截断：按代码块/段落边界切分
-  const chunks = splitAtBoundaries(clean, MAX_MESSAGE_LENGTH);
+```
+Claude Code → control_request { subtype: 'can_use_tool', tool_name: 'Bash', input: {...} }
+           ← control_response { subtype: 'success', response: { behavior: 'allow' } }
+```
 
-  // 3. 如果太长，发摘要 + 保存全文
-  if (chunks.length > 3) {
-    return [
-      summarize(clean),
-      '(完整输出已保存，发 `pty.read <sessionId> --full` 查看)'
-    ];
+**Slash 命令处理**：
+
+```typescript
+function handleSpecialCommand(input: string): boolean {
+  const trimmed = input.trim();
+  if (trimmed === '/clear') {
+    session.clearSessionId();  // 重置会话
+    return true;
+  }
+  if (trimmed.startsWith('/compact')) {
+    // 发给 SDK 处理 context compaction
+    messages.push({ type: 'user', message: { role: 'user', content: trimmed } });
+    return true;
+  }
+  return false;  // 不是特殊命令，正常发送
+}
+```
+
+**模式切换**：
+
+```
+本地 → 远程：
+  1. 终止本地 Claude Code 进程（SIGTERM）
+  2. 以 SDK 模式启动新进程（--resume <sessionId> --output-format stream-json）
+  3. 会话上下文通过 Claude Code 的 session 持久化机制恢复
+
+远程 → 本地：
+  1. 终止 SDK 模式进程
+  2. 以本地模式启动新进程（--resume <sessionId>，stdio inherit）
+  3. 用户在终端看到恢复的会话
+```
+
+### 4.2 Codex：MCP 桥接（待调研）
+
+参考 Happy Coder 的 `codexMcpClient.ts` + `happyMcpStdioBridge.ts`，通过 MCP（Model Context Protocol）桥接 Codex。
+
+**待 Phase 3 详细设计。**
+
+### 4.3 Gemini / 其他 CLI：PTY 通用桥接
+
+对没有 SDK 的工具，使用 PTY 桥接作为通用方案。
+
+```typescript
+class PTYRemoteSession {
+  private pty: IPty;
+  private rules: ParserRuleSet;
+
+  async send(input: string): Promise<void> {
+    this.pty.write(input + '\n');
   }
 
+  async read(limit?: number): Promise<SessionMessage[]> {
+    return this.outputBuffer.slice(-(limit || 50));
+  }
+}
+```
+
+PTY 方案的已知限制：
+- 输出解析依赖可配置的规则集，可能因 CLI 版本变化而失效
+- 权限检测不如 SDK 精确，采用保守策略（宁可多通知）
+- 降级模式：解析失败时发送原始文本
+
+### 4.4 输出格式化与推送
+
+无论 SDK 还是 PTY，最终都转换为统一的 `SessionMessage` 格式，再适配到 Telegram/Discord：
+
+```typescript
+const MAX_TELEGRAM_LENGTH = 4000;
+
+function formatForTelegram(messages: SessionMessage[]): string[] {
+  const chunks: string[] = [];
+  let current = '';
+
+  for (const msg of messages) {
+    const formatted = formatMessage(msg);
+    if (current.length + formatted.length > MAX_TELEGRAM_LENGTH) {
+      chunks.push(current);
+      current = formatted;
+    } else {
+      current += formatted;
+    }
+  }
+
+  if (current) chunks.push(current);
+
+  // 超过 3 段时发摘要
+  if (chunks.length > 3) {
+    return [summarize(messages), '(发 "查看完整输出" 获取全文)'];
+  }
   return chunks;
+}
+
+function formatMessage(msg: SessionMessage): string {
+  switch (msg.type) {
+    case 'code':
+      return `\`\`\`${msg.metadata?.language || ''}\n${msg.content}\n\`\`\`\n`;
+    case 'tool_use':
+      return `🔧 ${msg.metadata?.tool}: ${msg.content}\n`;
+    case 'error':
+      return `❌ ${msg.content}\n`;
+    case 'thinking':
+      return `💭 思考中...\n`;
+    default:
+      return msg.content + '\n';
+  }
 }
 ```
 
 ## 5. 实现计划
 
-### Phase 1: MVP — Spawn 模式（2-3 天）
+### Phase 1: Claude Code SDK 模式 MVP（3-4 天）
 
-**目标**：通过 OpenClaw 启动和管理 Claude Code session
+**目标**：通过 OpenClaw 远程操控 Claude Code session
 
-- [ ] 项目脚手架（TypeScript + node-pty）
-- [ ] SessionManager: spawn / send / read / list / detach
-- [ ] 基础 Output Parser（strip ANSI + 简单分段）
+- [ ] 项目脚手架（TypeScript + ESM）
+- [ ] SessionProvider 接口定义
+- [ ] ClaudeSDKProvider: 远程模式（SDK stream-json 交互）
+- [ ] ClaudeSDKProvider: 本地模式（stdio inherit + fd3 追踪）
+- [ ] SessionManager: spawn / send / read / list / stop
+- [ ] 权限请求推送 + pty.respond 回复
 - [ ] OpenClaw Plugin 注册（暴露 tools）
-- [ ] 集成测试：Telegram 发消息 → spawn claude → 交互 → 读输出
+- [ ] 集成测试：Telegram → spawn claude → 交互 → 权限确认 → 读输出
 
-### Phase 2: 智能输出 + 事件推送（2-3 天）
+### Phase 2: 模式切换 + 多 Session（2-3 天）
 
-**目标**：解析 CLI 输出，检测关键事件并主动推送
+**目标**：支持 local/remote 模式切换和多 session 管理
 
-- [ ] Claude Code 输出解析器（权限请求、工具使用、错误、完成）
-- [ ] Codex 输出解析器
-- [ ] EventDetector：关键事件检测 + 通知
-- [ ] 输出格式化：智能截断、代码块识别
-- [ ] Telegram inline buttons：权限确认快速回复
+- [ ] ClaudeSDKProvider: switchMode（local ↔ remote）
+- [ ] pty.resume / pty.switch 工具
+- [ ] 多 session 管理 + session 选择逻辑
+- [ ] Slash 命令拦截处理（/clear, /compact）
+- [ ] Session 元数据持久化（~/.happyclaw/sessions.json）
+- [ ] 事件推送优化：Telegram inline buttons
 
-### Phase 3: 控制权切换 + 多 Session（2-3 天）
+### Phase 3: Codex + Gemini 支持（3-4 天）
 
-**目标**：支持本地/远程切换和多个并行 session
+**目标**：拓展到 Codex 和 Gemini CLI
 
-- [ ] ControlManager: 控制权状态机
-- [ ] 多 session 管理 + session 选择器
-- [ ] Resume 模式（`claude --continue`）
-- [ ] Gemini CLI 支持
+- [ ] GenericPTYProvider: PTY 桥接基础实现
+- [ ] Gemini CLI 解析规则集
+- [ ] Codex MCP 桥接方案调研与实现
+- [ ] Provider 自动注册（检测本机已安装的 CLI 工具）
 
-### Phase 4: 打磨与优化（1-2 天）
+### Phase 4: 打磨与优化（2-3 天）
 
-- [ ] 错误恢复（进程崩溃检测 + 自动重试）
-- [ ] 性能优化（输出缓冲策略）
+- [ ] 进程健康检查 + 崩溃通知
+- [ ] Session 自动清理（超时 / 进程已退出）
+- [ ] 安全加固：session owner 绑定、cwd 白名单、审计日志
+- [ ] 错误恢复策略
+- [ ] 单元测试 + 集成测试完善
 - [ ] 文档完善
-- [ ] 单元测试
 
 ## 6. 技术栈
 
 | 组件 | 技术 | 说明 |
 |------|------|------|
 | 运行时 | Node.js (ESM) | 与 OpenClaw 保持一致 |
-| PTY 管理 | `node-pty` | 跨平台终端模拟 |
-| 终端解析 | `strip-ansi` + 自研 parser | ANSI 码清理 + 结构化解析 |
-| 类型系统 | TypeScript | 类型安全 |
+| Claude Code 交互 | Claude Code SDK / CLI stream-json | 结构化输入输出 |
+| PTY 管理 | `node-pty` | 通用 CLI 桥接后备方案 |
+| 终端模拟 | `xterm-headless` | PTY 模式下的终端状态解析 |
+| 终端清理 | `strip-ansi` | ANSI 码清理 |
+| 类型系统 | TypeScript (strict) | 类型安全 |
 | 测试 | Vitest | 轻量快速 |
-| 包管理 | npm | 与 OpenClaw 一致 |
+| 包管理 | pnpm | 高效的依赖管理 |
 
 ## 7. 目录结构
 
 ```
 happyclaw/
-├── README.md
-├── package.json
-├── tsconfig.json
 ├── docs/
-│   └── technical-proposal.md      # 本文档
+│   ├── technical-proposal.md      # 本文档
+│   └── archive/                   # 旧版文档归档
 ├── src/
 │   ├── index.ts                   # Plugin 入口
 │   ├── plugin.ts                  # OpenClaw Plugin 注册
 │   ├── session/
-│   │   ├── manager.ts             # Session 生命周期管理
-│   │   ├── discovery.ts           # 进程发现
-│   │   └── types.ts               # 类型定义
-│   ├── parser/
-│   │   ├── base.ts                # 基础解析器
-│   │   ├── claude.ts              # Claude Code 输出解析
-│   │   ├── codex.ts               # Codex 输出解析
-│   │   └── gemini.ts              # Gemini 输出解析
+│   │   ├── manager.ts             # Session Manager
+│   │   ├── types.ts               # 统一类型定义（Provider, Session, Message, Event）
+│   │   └── persistence.ts         # Session 元数据持久化
+│   ├── providers/
+│   │   ├── provider.ts            # SessionProvider 接口
+│   │   ├── claude/
+│   │   │   ├── sdk-provider.ts    # ClaudeSDKProvider
+│   │   │   ├── local-session.ts   # 本地模式（stdio inherit）
+│   │   │   ├── remote-session.ts  # 远程模式（SDK stream-json）
+│   │   │   └── commands.ts        # Slash 命令拦截
+│   │   ├── codex/
+│   │   │   └── mcp-provider.ts    # CodexMCPProvider（Phase 3）
+│   │   └── generic/
+│   │       ├── pty-provider.ts    # GenericPTYProvider
+│   │       ├── pty-session.ts     # PTY 桥接 session
+│   │       └── parser-rules.ts   # 可配置的解析规则引擎
 │   ├── events/
-│   │   ├── detector.ts            # 事件检测器
-│   │   └── notifier.ts            # 通知发送
-│   └── control/
-│       └── manager.ts             # 控制权管理
-└── tests/
-    ├── session.test.ts
-    ├── parser.test.ts
-    └── events.test.ts
+│   │   └── notifier.ts            # 事件 → OpenClaw 消息路由
+│   └── utils/
+│       ├── format.ts              # 消息格式化（Telegram/Discord 适配）
+│       └── security.ts            # 安全工具（session owner、cwd 校验）
+├── tests/
+│   ├── providers/
+│   │   ├── claude-sdk.test.ts
+│   │   └── generic-pty.test.ts
+│   ├── session/
+│   │   └── manager.test.ts
+│   └── integration/
+│       └── telegram-flow.test.ts
+├── package.json
+├── tsconfig.json
+└── README.md
 ```
 
 ## 8. 风险与缓解
 
 | 风险 | 影响 | 缓解措施 |
 |------|------|---------|
-| macOS 无法 attach 到已有 PTY | 无法接管已运行的 session | 双轨策略：spawn + continue |
-| CLI 输出格式变化 | 解析器失效 | 版本检测 + 降级为 raw 文本 |
-| node-pty 在 Apple Silicon 编译问题 | 安装失败 | prebuild-install + 备选方案 |
-| 长时间运行的 session 内存增长 | OOM | RingBuffer 限制 + 定期清理 |
-| OpenClaw Plugin API 变化 | 插件不兼容 | 跟踪 OpenClaw 版本，最小 API 依赖 |
+| Claude Code SDK API 变更 | 远程模式失效 | 锁定 SDK 版本 + 版本兼容性测试 + 降级到 PTY |
+| 模式切换时 --resume 恢复失败 | 会话上下文丢失 | 本地保存 session 元数据，支持从头开始新会话 |
+| 模式切换中断正在执行的操作 | 文件修改不完整 | 切换前检查 Claude 是否在执行工具，等待完成后再切换 |
+| Codex MCP 桥接方案不成熟 | Codex 支持延迟 | Phase 3 再做，先用 PTY 兜底 |
+| node-pty 在 Apple Silicon 编译问题 | PTY 模式安装失败 | prebuild-install + PTY 模式为可选功能 |
+| 长时间 session 内存增长 | OOM | 消息缓冲区限制 + 定期清理 |
+| OpenClaw Plugin API 变化 | 插件不兼容 | 最小 API 依赖 + 版本跟踪 |
 
 ## 9. 与 Happy Coder 的差异
 
 | 维度 | Happy Coder | HappyClaw |
 |------|------------|-----------|
-| 客户端 | 自建 Expo App | 复用 Telegram/Discord |
+| 客户端 | 自建 Expo App + Web App | 复用 Telegram/Discord |
 | 服务端 | 自建 Server (Postgres/Redis/S3) | 复用 OpenClaw Gateway |
-| 加密 | E2E (AES-256-GCM) | 本地运行，无需加密 |
+| 加密 | E2E (AES-256-GCM) | 本地运行，依赖 OpenClaw 安全机制 |
 | 用户体系 | 自建（公钥认证） | 复用 OpenClaw 身份系统 |
-| 部署 | Docker (Server) + npm (CLI) | npm (Plugin only) |
+| 部署 | Docker (Server) + npm (CLI) | pnpm (Plugin only) |
+| Claude 远程交互 | Claude Code SDK | Claude Code SDK（相同） |
+| Codex 远程交互 | MCP 桥接 | MCP 桥接（参考） |
+| 通用 CLI 支持 | 无 | GenericPTYProvider（额外支持） |
 | 生态集成 | 独立工具 | OpenClaw 生态（skills, agents, cron）|
-| 复杂度 | 高（三个 package） | 低（单 plugin） |
+| 复杂度 | 高（三个 package） | 中（单 plugin + Provider 抽象） |
 
-**HappyClaw 的优势**：不需要额外的 Server、App、用户体系和加密层——这些 OpenClaw 全都已经有了。只需要专注于 PTY 桥接这一核心能力。
+**HappyClaw 的优势**：
+1. 不需要额外的 Server、App、用户体系——OpenClaw 全都有
+2. 通过 GenericPTYProvider 额外支持没有 SDK 的 CLI 工具
+3. 作为 OpenClaw Plugin，天然融入现有的 Agent 生态
