@@ -1,0 +1,20 @@
+{
+  "id": "happyclaw",
+  "name": "HappyClaw",
+  "description": "AI CLI session bridge — spawn, control, and switch between Claude/Codex sessions from Telegram or Discord.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "maxSessions": {
+        "type": "number",
+        "description": "Maximum concurrent sessions (default: 10)"
+      },
+      "cwdWhitelist": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Allowed working directories (empty = no restriction)"
+      }
+    }
+  }
+}
