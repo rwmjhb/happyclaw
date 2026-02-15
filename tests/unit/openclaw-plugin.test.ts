@@ -18,14 +18,17 @@ import type { OpenClawPluginApi } from '../../src/openclaw-plugin.js';
 // Helpers
 // ---------------------------------------------------------------------------
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyHookHandler = (...args: any[]) => any;
+
 function createMockApi(
   overrides: Partial<OpenClawPluginApi> = {},
 ): OpenClawPluginApi & {
   registeredTools: unknown[];
-  hookHandlers: Map<string, Array<(...args: unknown[]) => void>>;
+  hookHandlers: Map<string, AnyHookHandler[]>;
 } {
   const registeredTools: unknown[] = [];
-  const hookHandlers = new Map<string, Array<(...args: unknown[]) => void>>();
+  const hookHandlers = new Map<string, AnyHookHandler[]>();
 
   return {
     id: 'happyclaw-test',
@@ -39,7 +42,7 @@ function createMockApi(
     registerTool: vi.fn((tool, _opts) => {
       registeredTools.push(tool);
     }),
-    on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
+    on: vi.fn((event: string, handler: AnyHookHandler) => {
       let handlers = hookHandlers.get(event);
       if (!handlers) {
         handlers = [];
@@ -104,6 +107,88 @@ describe('happyclawPlugin', () => {
     happyclawPlugin.register(api);
 
     expect(api.hookHandlers.has('gateway_stop')).toBe(true);
+  });
+
+  it('register() hooks before_tool_call', () => {
+    const api = createMockApi();
+    happyclawPlugin.register(api);
+
+    expect(api.hookHandlers.has('before_tool_call')).toBe(true);
+  });
+
+  describe('before_tool_call hook', () => {
+    function callHook(
+      api: ReturnType<typeof createMockApi>,
+      event: unknown,
+    ): unknown {
+      const handlers = api.hookHandlers.get('before_tool_call') ?? [];
+      for (const h of handlers) {
+        const result = h(event);
+        if (result) return result;
+      }
+      return undefined;
+    }
+
+    it('blocks exec("claude ...") with block: true', () => {
+      const api = createMockApi();
+      happyclawPlugin.register(api);
+
+      const result = callHook(api, {
+        toolName: 'exec',
+        params: { command: 'claude --yes -p "do something"' },
+      }) as { block: boolean; blockReason: string };
+
+      expect(result.block).toBe(true);
+      expect(result.blockReason).toContain('session_spawn');
+    });
+
+    it('blocks exec("codex ...") case-insensitively', () => {
+      const api = createMockApi();
+      happyclawPlugin.register(api);
+
+      const result = callHook(api, {
+        toolName: 'exec',
+        params: { command: 'Codex --full-auto' },
+      }) as { block: boolean; blockReason: string };
+
+      expect(result.block).toBe(true);
+    });
+
+    it('allows exec for non-Claude/Codex commands', () => {
+      const api = createMockApi();
+      happyclawPlugin.register(api);
+
+      const result = callHook(api, {
+        toolName: 'exec',
+        params: { command: 'git status' },
+      });
+
+      expect(result).toBeUndefined();
+    });
+
+    it('does not block process tool (only logs hint)', () => {
+      const api = createMockApi();
+      happyclawPlugin.register(api);
+
+      const result = callHook(api, {
+        toolName: 'process',
+        params: { pid: 12345, action: 'write' },
+      });
+
+      expect(result).toBeUndefined();
+    });
+
+    it('ignores unrelated tools', () => {
+      const api = createMockApi();
+      happyclawPlugin.register(api);
+
+      const result = callHook(api, {
+        toolName: 'read',
+        params: { path: '/tmp/foo' },
+      });
+
+      expect(result).toBeUndefined();
+    });
   });
 
   it('register() logs initialization messages', () => {

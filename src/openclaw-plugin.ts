@@ -115,8 +115,45 @@ const happyclawPlugin = {
         };
         return createOpenClawTools(manager, auditLogger, caller);
       },
-      { optional: true },
     );
+
+    // --- Block exec/process for Claude/Codex CLI (force session_* usage) ---
+    // OpenClaw hook event shape: { toolName: string, params: Record<string, unknown> }
+    // Return shape: { block?: boolean, blockReason?: string, params?: Record<string, unknown> }
+    api.on('before_tool_call', (event: unknown) => {
+      const e = event as {
+        toolName?: string;
+        params?: Record<string, unknown>;
+      };
+      const toolName = e?.toolName;
+      const params = e?.params ?? {};
+
+      if (toolName === 'exec') {
+        const cmd = String(params.command ?? params.cmd ?? '').trim();
+        if (/^(claude|codex)\b/i.test(cmd)) {
+          logger.warn(
+            `Blocked exec("${cmd.slice(0, 80)}") — use session_spawn instead`,
+          );
+          return {
+            block: true,
+            blockReason:
+              'Blocked: do not use exec to start Claude/Codex CLI. ' +
+              'Use session_spawn(provider, cwd) from the HappyClaw plugin instead. ' +
+              'See the happyclaw-sessions skill for details.',
+          };
+        }
+      }
+
+      if (toolName === 'process') {
+        const pid = params.pid ?? params.processId;
+        const action = String(params.action ?? '').toLowerCase();
+        if (pid && ['write', 'poll', 'kill', 'log'].includes(action)) {
+          logger.info(
+            `Hint: prefer session_send/read/stop over process(${action})`,
+          );
+        }
+      }
+    });
 
     // --- Cleanup on gateway shutdown ---
     api.on('gateway_stop', async () => {
