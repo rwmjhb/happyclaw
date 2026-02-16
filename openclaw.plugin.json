@@ -14,6 +14,18 @@
         "type": "array",
         "items": { "type": "string" },
         "description": "Allowed working directories (empty = no restriction)"
+      },
+      "telegramBotToken": {
+        "type": "string",
+        "description": "Telegram Bot API token for direct push notifications"
+      },
+      "telegramDefaultChatId": {
+        "type": "string",
+        "description": "Default Telegram chat ID for push notifications"
+      },
+      "telegramDebounceMs": {
+        "type": "number",
+        "description": "Debounce window for batching messages (default: 1500ms)"
       }
     }
   }
