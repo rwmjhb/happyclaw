@@ -27,6 +27,7 @@ import type {
   SwitchState,
   PersistedSession,
   ReadResult,
+  WaitReadResult,
   SessionACL as ISessionACL,
 } from './types/index.js';
 
@@ -265,6 +266,103 @@ export class SessionManager extends EventEmitter {
       messages,
       nextCursor: String(end),
     };
+  }
+
+  // -------------------------------------------------------------------------
+  // Blocking read (wait for new messages)
+  // -------------------------------------------------------------------------
+
+  /** Minimum/maximum/default timeout bounds for waitForMessages */
+  static readonly WAIT_TIMEOUT_MIN = 1_000;
+  static readonly WAIT_TIMEOUT_MAX = 120_000;
+  static readonly WAIT_TIMEOUT_DEFAULT = 30_000;
+
+  /**
+   * Wait for new messages from a session, blocking until messages arrive or timeout.
+   *
+   * Uses the TOCTOU-safe pattern: subscribe listener FIRST, then re-check buffer.
+   * This prevents missing messages that arrive between the initial check and subscription.
+   *
+   * Resolves early on:
+   * - New messages arriving for the target session
+   * - Session death/cleanup ('sessionEnd' event)
+   * - Timeout expiry
+   */
+  waitForMessages(
+    sessionId: string,
+    options?: { cursor?: string; limit?: number; timeoutMs?: number },
+  ): Promise<WaitReadResult> {
+    const buffer = this.messageBuffers.get(sessionId);
+    if (!buffer) {
+      throw new Error(`No message buffer for session: ${sessionId}`);
+    }
+
+    const limit = options?.limit ?? 50;
+    const rawTimeout = options?.timeoutMs ?? SessionManager.WAIT_TIMEOUT_DEFAULT;
+    const timeoutMs = Math.max(
+      SessionManager.WAIT_TIMEOUT_MIN,
+      Math.min(rawTimeout, SessionManager.WAIT_TIMEOUT_MAX),
+    );
+
+    // Fast path: messages already available
+    const initial = this.readMessages(sessionId, { cursor: options?.cursor, limit });
+    if (initial.messages.length > 0) {
+      return Promise.resolve({ ...initial, timedOut: false });
+    }
+
+    return new Promise<WaitReadResult>((resolve) => {
+      let settled = false;
+
+      const cleanup = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.removeListener('message', onMessage);
+        this.removeListener('sessionEnd', onSessionEnd);
+      };
+
+      // --- Timeout ---
+      const timer = setTimeout(() => {
+        cleanup();
+        // Return current state on timeout (may have messages from recheck)
+        const result = this.messageBuffers.has(sessionId)
+          ? this.readMessages(sessionId, { cursor: options?.cursor, limit })
+          : { messages: [], nextCursor: options?.cursor ?? '0' };
+        resolve({ ...result, timedOut: true });
+      }, timeoutMs);
+
+      // --- Message listener ---
+      const onMessage = (msgSessionId: string, _msg: SessionMessage) => {
+        if (msgSessionId !== sessionId) return;
+        cleanup();
+        resolve({
+          ...this.readMessages(sessionId, { cursor: options?.cursor, limit }),
+          timedOut: false,
+        });
+      };
+
+      // --- Session death listener ---
+      const onSessionEnd = (endedSessionId: string) => {
+        if (endedSessionId !== sessionId) return;
+        cleanup();
+        resolve({
+          messages: [],
+          nextCursor: options?.cursor ?? '0',
+          timedOut: false,
+        });
+      };
+
+      // Subscribe BEFORE re-check (TOCTOU fix)
+      this.on('message', onMessage);
+      this.on('sessionEnd', onSessionEnd);
+
+      // Re-check buffer after subscribing to close the race window
+      const recheck = this.readMessages(sessionId, { cursor: options?.cursor, limit });
+      if (recheck.messages.length > 0) {
+        cleanup();
+        resolve({ ...recheck, timedOut: false });
+      }
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -568,6 +666,9 @@ export class SessionManager extends EventEmitter {
     this.messageBuffers.delete(sessionId);
     this.lastActivityTimes.delete(sessionId);
     this.acl.removeSession(sessionId);
+
+    // Notify waiters that this session is gone
+    this.emit('sessionEnd', sessionId);
 
     // Remove from persistence
     this.persistence?.remove(sessionId).catch(() => {});

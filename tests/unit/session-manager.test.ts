@@ -542,6 +542,471 @@ describe('SessionManager', () => {
       expect(result.messages[0].content).not.toContain('mysecrettoken123');
     });
   });
+
+  // -------------------------------------------------------------------------
+  // waitForMessages (blocking read)
+  // -------------------------------------------------------------------------
+
+  describe('waitForMessages', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('returns immediately when messages exist past cursor', async () => {
+      const mockSession = createMockSession({ id: 'wait-buffered' });
+      mockProvider._setNextSession(mockSession);
+      await manager.spawn(
+        'claude',
+        { cwd: '/tmp/test', mode: 'remote' },
+        'user-1',
+      );
+
+      // Pre-fill buffer with messages
+      mockSession._emitMessage({
+        type: 'text',
+        content: 'Already here',
+        timestamp: Date.now(),
+      });
+      mockSession._emitMessage({
+        type: 'text',
+        content: 'Also here',
+        timestamp: Date.now(),
+      });
+
+      // cursor '0' means start from beginning — messages exist
+      const result = await manager.waitForMessages('wait-buffered', {
+        cursor: '0',
+        timeoutMs: 5000,
+      });
+
+      expect(result.messages).toHaveLength(2);
+      expect(result.messages[0].content).toContain('Already here');
+      expect(result.timedOut).toBe(false);
+    });
+
+    it('waits and resolves when a message arrives', async () => {
+      const mockSession = createMockSession({ id: 'wait-arrive' });
+      mockProvider._setNextSession(mockSession);
+      await manager.spawn(
+        'claude',
+        { cwd: '/tmp/test', mode: 'remote' },
+        'user-1',
+      );
+
+      // Start waiting (no messages in buffer yet)
+      const promise = manager.waitForMessages('wait-arrive', {
+        cursor: '0',
+        timeoutMs: 10_000,
+      });
+
+      // Simulate a message arriving after a small delay
+      await vi.advanceTimersByTimeAsync(100);
+      mockSession._emitMessage({
+        type: 'text',
+        content: 'Arrived during wait',
+        timestamp: Date.now(),
+      });
+
+      const result = await promise;
+
+      expect(result.messages).toHaveLength(1);
+      expect(result.messages[0].content).toContain('Arrived during wait');
+      expect(result.timedOut).toBe(false);
+    });
+
+    it('returns with timedOut flag on timeout', async () => {
+      const mockSession = createMockSession({ id: 'wait-timeout' });
+      mockProvider._setNextSession(mockSession);
+      await manager.spawn(
+        'claude',
+        { cwd: '/tmp/test', mode: 'remote' },
+        'user-1',
+      );
+
+      const promise = manager.waitForMessages('wait-timeout', {
+        cursor: '0',
+        timeoutMs: 3000,
+      });
+
+      // No messages arrive, advance past timeout
+      await vi.advanceTimersByTimeAsync(3500);
+
+      const result = await promise;
+
+      expect(result.messages).toHaveLength(0);
+      expect(result.timedOut).toBe(true);
+    });
+
+    it('resolves cleanly when session dies during wait', async () => {
+      const mockSession = createMockSession({ id: 'wait-death' });
+      mockProvider._setNextSession(mockSession);
+      await manager.spawn(
+        'claude',
+        { cwd: '/tmp/test', mode: 'remote' },
+        'user-1',
+      );
+
+      const promise = manager.waitForMessages('wait-death', {
+        cursor: '0',
+        timeoutMs: 10_000,
+      });
+
+      // Simulate session death via process exit event
+      await vi.advanceTimersByTimeAsync(100);
+      mockSession._emitEvent({
+        type: 'error',
+        severity: 'urgent',
+        sessionId: 'wait-death',
+        timestamp: Date.now(),
+        summary: 'Process exited with code 1',
+      });
+
+      const result = await promise;
+
+      // Should resolve (not reject) — sessionEnd triggered, not a timeout
+      expect(result.messages).toBeDefined();
+      expect(result.timedOut).toBe(false);
+    });
+
+    it('handles concurrent waits on same session', async () => {
+      const mockSession = createMockSession({ id: 'wait-concurrent' });
+      mockProvider._setNextSession(mockSession);
+      await manager.spawn(
+        'claude',
+        { cwd: '/tmp/test', mode: 'remote' },
+        'user-1',
+      );
+
+      // Two concurrent waits with different cursors
+      const promise1 = manager.waitForMessages('wait-concurrent', {
+        cursor: '0',
+        timeoutMs: 10_000,
+      });
+      const promise2 = manager.waitForMessages('wait-concurrent', {
+        cursor: '0',
+        timeoutMs: 10_000,
+      });
+
+      // A message arrives — both should resolve
+      await vi.advanceTimersByTimeAsync(100);
+      mockSession._emitMessage({
+        type: 'text',
+        content: 'Shared message',
+        timestamp: Date.now(),
+      });
+
+      const [result1, result2] = await Promise.all([promise1, promise2]);
+
+      expect(result1.messages).toHaveLength(1);
+      expect(result2.messages).toHaveLength(1);
+    });
+
+    it('respects cursor for incremental reads with wait', async () => {
+      const mockSession = createMockSession({ id: 'wait-cursor' });
+      mockProvider._setNextSession(mockSession);
+      await manager.spawn(
+        'claude',
+        { cwd: '/tmp/test', mode: 'remote' },
+        'user-1',
+      );
+
+      // Pre-fill 2 messages
+      mockSession._emitMessage({
+        type: 'text',
+        content: 'Old message 1',
+        timestamp: Date.now(),
+      });
+      mockSession._emitMessage({
+        type: 'text',
+        content: 'Old message 2',
+        timestamp: Date.now(),
+      });
+
+      // Wait with cursor='2' (past existing messages) — should block
+      const promise = manager.waitForMessages('wait-cursor', {
+        cursor: '2',
+        timeoutMs: 10_000,
+      });
+
+      // New message arrives
+      await vi.advanceTimersByTimeAsync(100);
+      mockSession._emitMessage({
+        type: 'text',
+        content: 'New message 3',
+        timestamp: Date.now(),
+      });
+
+      const result = await promise;
+
+      // Should only return the new message (after cursor=2)
+      expect(result.messages).toHaveLength(1);
+      expect(result.messages[0].content).toContain('New message 3');
+      expect(result.nextCursor).toBe('3');
+    });
+
+    it('cleans up listener and timer after resolve', async () => {
+      const mockSession = createMockSession({ id: 'wait-cleanup' });
+      mockProvider._setNextSession(mockSession);
+      await manager.spawn(
+        'claude',
+        { cwd: '/tmp/test', mode: 'remote' },
+        'user-1',
+      );
+
+      const listenersBefore = manager.listenerCount('message');
+
+      const promise = manager.waitForMessages('wait-cleanup', {
+        cursor: '0',
+        timeoutMs: 10_000,
+      });
+
+      // Verify listener was added
+      expect(manager.listenerCount('message')).toBeGreaterThan(
+        listenersBefore,
+      );
+
+      // Resolve by sending a message
+      await vi.advanceTimersByTimeAsync(100);
+      mockSession._emitMessage({
+        type: 'text',
+        content: 'Done',
+        timestamp: Date.now(),
+      });
+
+      await promise;
+
+      // Verify listener was cleaned up
+      expect(manager.listenerCount('message')).toBe(listenersBefore);
+    });
+
+    it('cleans up listener and timer after timeout', async () => {
+      const mockSession = createMockSession({ id: 'wait-cleanup-timeout' });
+      mockProvider._setNextSession(mockSession);
+      await manager.spawn(
+        'claude',
+        { cwd: '/tmp/test', mode: 'remote' },
+        'user-1',
+      );
+
+      const listenersBefore = manager.listenerCount('message');
+
+      const promise = manager.waitForMessages('wait-cleanup-timeout', {
+        cursor: '0',
+        timeoutMs: 2000,
+      });
+
+      await vi.advanceTimersByTimeAsync(2500);
+      await promise;
+
+      // Verify listener was cleaned up after timeout
+      expect(manager.listenerCount('message')).toBe(listenersBefore);
+    });
+
+    it('throws for non-existent session', () => {
+      expect(() =>
+        manager.waitForMessages('nonexistent', { timeoutMs: 1000 }),
+      ).toThrow(/no message buffer/i);
+    });
+
+    it('uses default timeout when not specified', async () => {
+      const mockSession = createMockSession({ id: 'wait-default' });
+      mockProvider._setNextSession(mockSession);
+      await manager.spawn(
+        'claude',
+        { cwd: '/tmp/test', mode: 'remote' },
+        'user-1',
+      );
+
+      const promise = manager.waitForMessages('wait-default', {
+        cursor: '0',
+      });
+
+      // Default timeout should be 30s — advance past it
+      await vi.advanceTimersByTimeAsync(31_000);
+
+      const result = await promise;
+      expect(result.timedOut).toBe(true);
+    });
+
+    it('applies redaction to waited messages', async () => {
+      const mockSession = createMockSession({ id: 'wait-redact' });
+      mockProvider._setNextSession(mockSession);
+      await manager.spawn(
+        'claude',
+        { cwd: '/tmp/test', mode: 'remote' },
+        'user-1',
+      );
+
+      const promise = manager.waitForMessages('wait-redact', {
+        cursor: '0',
+        timeoutMs: 5000,
+      });
+
+      await vi.advanceTimersByTimeAsync(100);
+      mockSession._emitMessage({
+        type: 'text',
+        content: 'Authorization: Bearer secret123abc',
+        timestamp: Date.now(),
+      });
+
+      const result = await promise;
+
+      expect(result.messages[0].content).toContain('Bearer [REDACTED]');
+      expect(result.messages[0].content).not.toContain('secret123abc');
+    });
+
+    it('respects limit parameter', async () => {
+      const mockSession = createMockSession({ id: 'wait-limit' });
+      mockProvider._setNextSession(mockSession);
+      await manager.spawn(
+        'claude',
+        { cwd: '/tmp/test', mode: 'remote' },
+        'user-1',
+      );
+
+      // Pre-fill buffer with many messages
+      for (let i = 0; i < 10; i++) {
+        mockSession._emitMessage({
+          type: 'text',
+          content: `Message ${i}`,
+          timestamp: Date.now(),
+        });
+      }
+
+      const result = await manager.waitForMessages('wait-limit', {
+        cursor: '0',
+        limit: 3,
+        timeoutMs: 5000,
+      });
+
+      expect(result.messages).toHaveLength(3);
+      expect(result.nextCursor).toBe('3');
+    });
+
+    it('clamps timeout to minimum bound (1000ms)', async () => {
+      const mockSession = createMockSession({ id: 'wait-clamp-min' });
+      mockProvider._setNextSession(mockSession);
+      await manager.spawn(
+        'claude',
+        { cwd: '/tmp/test', mode: 'remote' },
+        'user-1',
+      );
+
+      const promise = manager.waitForMessages('wait-clamp-min', {
+        cursor: '0',
+        timeoutMs: 100, // Below minimum of 1000ms
+      });
+
+      // At 500ms it should NOT have timed out yet (clamped to 1000ms)
+      await vi.advanceTimersByTimeAsync(500);
+
+      // At 1100ms it should have timed out (clamped to 1000ms min)
+      await vi.advanceTimersByTimeAsync(600);
+
+      const result = await promise;
+      expect(result.timedOut).toBe(true);
+    });
+
+    it('clamps timeout to maximum bound (120000ms)', async () => {
+      const mockSession = createMockSession({ id: 'wait-clamp-max' });
+      mockProvider._setNextSession(mockSession);
+      await manager.spawn(
+        'claude',
+        { cwd: '/tmp/test', mode: 'remote' },
+        'user-1',
+      );
+
+      const promise = manager.waitForMessages('wait-clamp-max', {
+        cursor: '0',
+        timeoutMs: 300_000, // Above maximum of 120000ms
+      });
+
+      // At 120s it should time out (clamped to max)
+      await vi.advanceTimersByTimeAsync(121_000);
+
+      const result = await promise;
+      expect(result.timedOut).toBe(true);
+    });
+
+    it('ignores messages for other sessions', async () => {
+      const session1 = createMockSession({ id: 'wait-ignore-1' });
+      mockProvider._setNextSession(session1);
+      await manager.spawn(
+        'claude',
+        { cwd: '/tmp/test', mode: 'remote' },
+        'user-1',
+      );
+
+      const session2 = createMockSession({ id: 'wait-ignore-2' });
+      mockProvider._setNextSession(session2);
+      await manager.spawn(
+        'claude',
+        { cwd: '/tmp/test', mode: 'remote' },
+        'user-1',
+      );
+
+      // Wait on session 1
+      const promise = manager.waitForMessages('wait-ignore-1', {
+        cursor: '0',
+        timeoutMs: 3000,
+      });
+
+      // Message arrives on session 2 — should NOT wake up the wait
+      await vi.advanceTimersByTimeAsync(100);
+      session2._emitMessage({
+        type: 'text',
+        content: 'Wrong session',
+        timestamp: Date.now(),
+      });
+
+      // Wait should still be pending — advance to timeout
+      await vi.advanceTimersByTimeAsync(3500);
+
+      const result = await promise;
+      // Should have timed out since no messages arrived on session 1
+      expect(result.timedOut).toBe(true);
+      expect(result.messages).toHaveLength(0);
+    });
+
+    it('cleans up sessionEnd listener after resolve', async () => {
+      const mockSession = createMockSession({ id: 'wait-cleanup-end' });
+      mockProvider._setNextSession(mockSession);
+      await manager.spawn(
+        'claude',
+        { cwd: '/tmp/test', mode: 'remote' },
+        'user-1',
+      );
+
+      const endListenersBefore = manager.listenerCount('sessionEnd');
+
+      const promise = manager.waitForMessages('wait-cleanup-end', {
+        cursor: '0',
+        timeoutMs: 10_000,
+      });
+
+      // Verify sessionEnd listener was added
+      expect(manager.listenerCount('sessionEnd')).toBeGreaterThan(
+        endListenersBefore,
+      );
+
+      // Resolve by sending a message
+      await vi.advanceTimersByTimeAsync(100);
+      mockSession._emitMessage({
+        type: 'text',
+        content: 'Done',
+        timestamp: Date.now(),
+      });
+
+      await promise;
+
+      // Verify sessionEnd listener was cleaned up
+      expect(manager.listenerCount('sessionEnd')).toBe(endListenersBefore);
+    });
+  });
 });
 
 // Import SessionEvent type for event handler typing

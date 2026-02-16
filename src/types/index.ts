@@ -160,6 +160,12 @@ export interface ReadResult {
   nextCursor: string;
 }
 
+/** Read result extended with wait metadata */
+export interface WaitReadResult extends ReadResult {
+  /** true if the wait timed out without new messages */
+  timedOut: boolean;
+}
+
 /** Event handler callback */
 export type EventHandler = (event: SessionEvent) => void;
 

@@ -430,6 +430,132 @@ describe('createOpenClawTools', () => {
       const parsed = JSON.parse(result.content[0].text);
       expect(parsed.output).toBe('(no new output)');
     });
+
+    it('wait=false (default) uses sync readMessages (backwards compat)', async () => {
+      const session = manager.get('sess-1') as ReturnType<
+        typeof createMockSession
+      >;
+      session._emitMessage({
+        type: 'text',
+        content: 'Sync read',
+        timestamp: Date.now(),
+      });
+
+      const tool = findTool('session_read');
+      // Explicitly pass wait: false
+      const result = (await tool.execute('call-1', {
+        sessionId: 'sess-1',
+        wait: false,
+      })) as { content: Array<{ text: string }> };
+
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.messageCount).toBe(1);
+      expect(parsed.output).toContain('Sync read');
+      // Should NOT have a 'timedOut' field when wait is false
+      expect(parsed.timedOut).toBeUndefined();
+    });
+
+    it('omitting wait defaults to sync read (no timedOut field)', async () => {
+      const tool = findTool('session_read');
+      const result = (await tool.execute('call-1', {
+        sessionId: 'sess-1',
+      })) as { content: Array<{ text: string }> };
+
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.timedOut).toBeUndefined();
+    });
+
+    it('wait=true calls waitForMessages and returns timedOut field', async () => {
+      const session = manager.get('sess-1') as ReturnType<
+        typeof createMockSession
+      >;
+      session._emitMessage({
+        type: 'text',
+        content: 'Pre-existing message',
+        timestamp: Date.now(),
+      });
+
+      const tool = findTool('session_read');
+      const result = (await tool.execute('call-1', {
+        sessionId: 'sess-1',
+        wait: true,
+        cursor: '0',
+      })) as { content: Array<{ text: string }> };
+
+      const parsed = JSON.parse(result.content[0].text);
+      // Should return the pre-existing message immediately (fast path)
+      expect(parsed.messageCount).toBe(1);
+      expect(parsed.output).toContain('Pre-existing message');
+      expect(parsed.timedOut).toBe(false);
+    });
+
+    it('wait=true with custom timeout respects timeout param', async () => {
+      vi.useFakeTimers();
+
+      try {
+        const tool = findTool('session_read');
+        const promise = tool.execute('call-1', {
+          sessionId: 'sess-1',
+          wait: true,
+          timeout: 2000,
+          cursor: '0',
+        }) as Promise<{ content: Array<{ text: string }> }>;
+
+        // Advance past the 2s timeout
+        await vi.advanceTimersByTimeAsync(2500);
+
+        const result = await promise;
+        const parsed = JSON.parse(result.content[0].text);
+
+        expect(parsed.timedOut).toBe(true);
+        expect(parsed.messageCount).toBe(0);
+        expect(parsed.output).toBe('(no new output)');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('wait=true ACL check enforced before waiting', async () => {
+      const otherTools = createOpenClawTools(manager, audit, otherCaller);
+      const tool = otherTools.find(
+        (t) => (t as { name: string }).name === 'session_read',
+      ) as { execute: (id: string, params: Record<string, unknown>) => Promise<unknown> };
+
+      await expect(
+        tool.execute('call-1', {
+          sessionId: 'sess-1',
+          wait: true,
+          timeout: 5000,
+        }),
+      ).rejects.toThrow(/does not own|not found|access denied/i);
+    });
+
+    it('wait=true logs wait and timedOut in audit', async () => {
+      const session = manager.get('sess-1') as ReturnType<
+        typeof createMockSession
+      >;
+      session._emitMessage({
+        type: 'text',
+        content: 'Audit test',
+        timestamp: Date.now(),
+      });
+
+      const tool = findTool('session_read');
+      await tool.execute('call-1', {
+        sessionId: 'sess-1',
+        wait: true,
+        cursor: '0',
+      });
+
+      expect(audit.log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: 'owner-1',
+          action: 'read',
+          sessionId: 'sess-1',
+          details: expect.objectContaining({ wait: true, timedOut: false }),
+        }),
+      );
+    });
   });
 
   // -----------------------------------------------------------------------

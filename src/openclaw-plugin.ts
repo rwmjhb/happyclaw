@@ -362,7 +362,8 @@ function createOpenClawTools(
       name: 'session_read',
       label: 'Read AI session output',
       description:
-        'Read output from a CLI session. Supports cursor-based pagination for large outputs.',
+        'Read output from a CLI session. Supports cursor-based pagination. ' +
+        'Set wait=true to block until new messages arrive or timeout.',
       parameters: Type.Object({
         sessionId: Type.String({ description: 'Session ID to read from' }),
         cursor: Type.Optional(
@@ -375,17 +376,44 @@ function createOpenClawTools(
             description: 'Maximum messages to return (default: 50)',
           }),
         ),
+        wait: Type.Optional(
+          Type.Boolean({
+            description:
+              'Block until new messages arrive or timeout (default: false)',
+          }),
+        ),
+        timeout: Type.Optional(
+          Type.Number({
+            description:
+              'Wait timeout in ms (default: 30000, min: 1000, max: 120000). Only used when wait=true.',
+          }),
+        ),
       }),
       async execute(_id: string, params: Record<string, unknown>) {
         const sessionId = params.sessionId as string;
         manager.acl.assertOwner(caller.userId, sessionId);
 
-        const result = manager.readMessages(sessionId, {
+        const wait = params.wait as boolean | undefined;
+        const readOpts = {
           cursor: params.cursor as string | undefined,
           limit: params.limit as number | undefined,
-        });
+        };
 
-        log('read', sessionId);
+        let result;
+        let timedOut = false;
+
+        if (wait) {
+          const waitResult = await manager.waitForMessages(sessionId, {
+            ...readOpts,
+            timeoutMs: params.timeout as number | undefined,
+          });
+          result = waitResult;
+          timedOut = waitResult.timedOut;
+        } else {
+          result = manager.readMessages(sessionId, readOpts);
+        }
+
+        log('read', sessionId, { wait: !!wait, timedOut });
 
         const formatted = result.messages
           .map((m: SessionMessage) => `[${m.type}] ${m.content}`)
@@ -395,6 +423,7 @@ function createOpenClawTools(
           messageCount: result.messages.length,
           nextCursor: result.nextCursor,
           output: formatted || '(no new output)',
+          ...(wait ? { timedOut } : {}),
         });
       },
     },
