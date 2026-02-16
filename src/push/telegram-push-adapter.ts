@@ -67,7 +67,9 @@ export class TelegramPushAdapter {
 
   /** Bind a session to a Telegram chat. Uses defaultChatId if none specified. */
   bindSession(sessionId: string, chatId?: string): void {
-    this.sessionChats.set(sessionId, chatId ?? this.defaultChatId);
+    const resolved = chatId ?? this.defaultChatId;
+    this.sessionChats.set(sessionId, resolved);
+    this.logger.info(`Push bind: session="${sessionId}" → chat=${resolved}`);
   }
 
   /** Unbind a session and flush remaining messages. */
@@ -83,7 +85,12 @@ export class TelegramPushAdapter {
   /** Handle a new message from SessionManager. Batches with debounce. */
   handleMessage(sessionId: string, msg: SessionMessage): void {
     const chatId = this.sessionChats.get(sessionId);
-    if (!chatId) return;
+    if (!chatId) {
+      this.logger.warn(
+        `Push skip: no binding for session="${sessionId}" (type=${msg.type}, bindings=[${[...this.sessionChats.keys()].join(',')}])`,
+      );
+      return;
+    }
 
     let batch = this.batches.get(sessionId);
     if (!batch) {
@@ -161,6 +168,9 @@ export class TelegramPushAdapter {
     if (!chatId) return;
 
     const chunks = formatForTelegram(batch);
+    this.logger.info(
+      `Push flush: session="${sessionId}", msgs=${batch.length}, chunks=${chunks.length}`,
+    );
     // Send chunks sequentially to preserve order
     this.sendChunksSequentially(chatId, chunks).catch((err) => {
       this.logger.error(`TG push flush failed: ${err}`);
@@ -195,6 +205,10 @@ export class TelegramPushAdapter {
       headers: { 'Content-Type': 'application/json' },
       body,
     });
+
+    if (res.ok) {
+      this.logger.info(`Push sent OK: chat=${chatId}, len=${text.length}`);
+    }
 
     if (!res.ok) {
       const resBody = await res.text().catch(() => 'unknown');

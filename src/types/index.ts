@@ -135,6 +135,42 @@ export interface SpawnOptions {
   args?: string[];
   /** Session ID to resume (passed to SDK resume / CLI --resume) */
   resumeSessionId?: string;
+  /** Initial prompt to send immediately (kicks off SDK stream). */
+  initialPrompt?: string;
+  /** Permission mode for SDK sessions (default: 'default'). */
+  permissionMode?: string;
+  /** Claude model to use (e.g. 'claude-sonnet-4-5-20250929'). */
+  model?: string;
+  /** Max conversation turns before stopping. */
+  maxTurns?: number;
+  /** Max budget in USD before stopping. */
+  maxBudgetUsd?: number;
+  /** Tool names to auto-allow without permission prompts. */
+  allowedTools?: string[];
+  /** Tool names to completely disallow. */
+  disallowedTools?: string[];
+  /** Continue the most recent conversation in cwd (mutually exclusive with resumeSessionId). */
+  continueSession?: boolean;
+  /** Additional directories Claude can access beyond cwd. */
+  additionalDirectories?: string[];
+  /** Agent name for the main thread (must be defined in `agents` or settings). */
+  agent?: string;
+  /** Programmatic agent definitions keyed by name. */
+  agents?: Record<string, unknown>;
+  /** Programmatic MCP server configs keyed by name. */
+  mcpServers?: Record<string, unknown>;
+  /** Plugins to load (local paths). */
+  plugins?: Array<{ type: 'local'; path: string }>;
+  /** Enable file checkpointing for rewind support. */
+  enableFileCheckpointing?: boolean;
+  /** Fork to new session ID when resuming (instead of continuing same). */
+  forkSession?: boolean;
+  /** Sandbox settings for command execution isolation. */
+  sandbox?: Record<string, unknown>;
+  /** Enable verbose debug logging. */
+  debug?: boolean;
+  /** Write debug logs to this file path. */
+  debugFile?: string;
 }
 
 /** Unified provider interface — each CLI tool implements this */

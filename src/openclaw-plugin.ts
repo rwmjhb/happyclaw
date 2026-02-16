@@ -285,7 +285,8 @@ function createOpenClawTools(
       name: 'session_spawn',
       label: 'Start AI session',
       description:
-        'Start a new AI CLI session. Specify provider ("claude" or "codex") and working directory.',
+        'Start a new AI CLI session. Specify provider, working directory, and task. ' +
+        'The task is sent immediately so Claude starts working right away.',
       parameters: Type.Object({
         provider: Type.String({
           description: 'Provider name: "claude" or "codex"',
@@ -293,9 +294,128 @@ function createOpenClawTools(
         cwd: Type.String({
           description: 'Working directory for the session',
         }),
+        task: Type.String({
+          description:
+            'Initial task/prompt to send to the session. Required to start the session.',
+        }),
         mode: Type.Optional(
           Type.String({
             description: 'Session mode: "remote" (default) or "local"',
+          }),
+        ),
+        permissionMode: Type.Optional(
+          Type.String({
+            description:
+              'Permission mode: "default", "bypassPermissions", "acceptEdits", "plan", or "dontAsk"',
+          }),
+        ),
+        model: Type.Optional(
+          Type.String({
+            description:
+              'Claude model to use, e.g. "claude-sonnet-4-5-20250929", "claude-opus-4-20250514"',
+          }),
+        ),
+        maxTurns: Type.Optional(
+          Type.Number({
+            description: 'Max conversation turns before stopping (default: no limit)',
+          }),
+        ),
+        maxBudgetUsd: Type.Optional(
+          Type.Number({
+            description: 'Max budget in USD before stopping (default: no limit)',
+          }),
+        ),
+        allowedTools: Type.Optional(
+          Type.Array(Type.String(), {
+            description:
+              'Tool names to auto-allow without permission prompts (e.g. ["Bash","Edit","Write"])',
+          }),
+        ),
+        disallowedTools: Type.Optional(
+          Type.Array(Type.String(), {
+            description:
+              'Tool names to completely disallow (e.g. ["WebFetch"])',
+          }),
+        ),
+        continueSession: Type.Optional(
+          Type.Boolean({
+            description:
+              'Continue the most recent conversation in cwd instead of starting fresh (default: false)',
+          }),
+        ),
+        additionalDirectories: Type.Optional(
+          Type.Array(Type.String(), {
+            description:
+              'Additional absolute directory paths Claude can access beyond cwd',
+          }),
+        ),
+        agent: Type.Optional(
+          Type.String({
+            description:
+              'Agent name for the main thread (must be defined in agents param or in settings)',
+          }),
+        ),
+        agents: Type.Optional(
+          Type.Record(Type.String(), Type.Object({
+            description: Type.String(),
+            prompt: Type.String(),
+            tools: Type.Optional(Type.Array(Type.String())),
+            disallowedTools: Type.Optional(Type.Array(Type.String())),
+            model: Type.Optional(Type.String()),
+            maxTurns: Type.Optional(Type.Number()),
+          }), {
+            description:
+              'Programmatic sub-agent definitions keyed by name',
+          }),
+        ),
+        mcpServers: Type.Optional(
+          Type.Record(Type.String(), Type.Object({
+            command: Type.Optional(Type.String()),
+            args: Type.Optional(Type.Array(Type.String())),
+            env: Type.Optional(Type.Record(Type.String(), Type.String())),
+            type: Type.Optional(Type.String()),
+            url: Type.Optional(Type.String()),
+          }), {
+            description:
+              'MCP server configs keyed by name (stdio: {command,args,env} or http: {type:"http",url})',
+          }),
+        ),
+        plugins: Type.Optional(
+          Type.Array(Type.Object({
+            type: Type.Literal('local'),
+            path: Type.String(),
+          }), {
+            description:
+              'Plugins to load, e.g. [{"type":"local","path":"./my-plugin"}]',
+          }),
+        ),
+        enableFileCheckpointing: Type.Optional(
+          Type.Boolean({
+            description:
+              'Enable file checkpointing — allows rewinding files to previous state (default: false)',
+          }),
+        ),
+        sandbox: Type.Optional(
+          Type.Object({
+            enabled: Type.Optional(Type.Boolean()),
+            autoAllowBashIfSandboxed: Type.Optional(Type.Boolean()),
+            network: Type.Optional(Type.Object({
+              allowedDomains: Type.Optional(Type.Array(Type.String())),
+              allowLocalBinding: Type.Optional(Type.Boolean()),
+            })),
+          }, {
+            description:
+              'Sandbox settings for command execution isolation',
+          }),
+        ),
+        debug: Type.Optional(
+          Type.Boolean({
+            description: 'Enable verbose debug logging',
+          }),
+        ),
+        debugFile: Type.Optional(
+          Type.String({
+            description: 'Write debug logs to this file path',
           }),
         ),
       }),
@@ -305,6 +425,23 @@ function createOpenClawTools(
           {
             cwd: params.cwd as string,
             mode: (params.mode as 'local' | 'remote') ?? 'remote',
+            initialPrompt: params.task as string,
+            permissionMode: params.permissionMode as string | undefined,
+            model: params.model as string | undefined,
+            maxTurns: params.maxTurns as number | undefined,
+            maxBudgetUsd: params.maxBudgetUsd as number | undefined,
+            allowedTools: params.allowedTools as string[] | undefined,
+            disallowedTools: params.disallowedTools as string[] | undefined,
+            continueSession: params.continueSession as boolean | undefined,
+            additionalDirectories: params.additionalDirectories as string[] | undefined,
+            agent: params.agent as string | undefined,
+            agents: params.agents as Record<string, unknown> | undefined,
+            mcpServers: params.mcpServers as Record<string, unknown> | undefined,
+            plugins: params.plugins as Array<{ type: 'local'; path: string }> | undefined,
+            enableFileCheckpointing: params.enableFileCheckpointing as boolean | undefined,
+            sandbox: params.sandbox as Record<string, unknown> | undefined,
+            debug: params.debug as boolean | undefined,
+            debugFile: params.debugFile as string | undefined,
           },
           caller.userId,
         );
@@ -335,12 +472,38 @@ function createOpenClawTools(
       name: 'session_resume',
       label: 'Resume AI session',
       description:
-        'Resume an existing CLI session that was previously stopped or paused.',
+        'Resume an existing CLI session that was previously stopped or paused. ' +
+        'Provide a task/prompt so the SDK stream starts immediately.',
       parameters: Type.Object({
         sessionId: Type.String({ description: 'Session ID to resume' }),
+        task: Type.String({
+          description:
+            'Prompt to send immediately upon resume so the SDK stream starts.',
+        }),
         mode: Type.Optional(
           Type.String({
             description: 'Session mode: "remote" (default) or "local"',
+          }),
+        ),
+        permissionMode: Type.Optional(
+          Type.String({
+            description:
+              'Permission mode: "default", "bypassPermissions", "acceptEdits", "plan", or "dontAsk"',
+          }),
+        ),
+        model: Type.Optional(
+          Type.String({
+            description: 'Claude model to use',
+          }),
+        ),
+        forkSession: Type.Optional(
+          Type.Boolean({
+            description: 'Fork to a new session ID instead of continuing the same one (default: false)',
+          }),
+        ),
+        debug: Type.Optional(
+          Type.Boolean({
+            description: 'Enable verbose debug logging',
           }),
         ),
       }),
@@ -350,6 +513,9 @@ function createOpenClawTools(
 
         const session = await manager.resume(sessionId, {
           mode: (params.mode as 'local' | 'remote') ?? 'remote',
+          permissionMode: params.permissionMode as string | undefined,
+          model: params.model as string | undefined,
+          initialPrompt: params.task as string,
         });
 
         pushAdapter?.bindSession(session.id);

@@ -28,6 +28,7 @@ import type {
   ReadResult,
   EventHandler,
   MessageHandler,
+  PermissionMode,
 } from '../types/index.js';
 import { AsyncQueue } from '../types/index.js';
 
@@ -97,18 +98,50 @@ export class ClaudeRemoteSession implements ProviderSession {
     this.cwd = options.cwd;
     this.inputQueue = new AsyncQueue<SDKUserMessage>();
 
+    // SDK with AsyncIterable prompt waits for the first user message before
+    // yielding any output (including system:init with session_id). Push the
+    // initial prompt immediately so the SDK stream starts. Without this,
+    // waitForReady() would hang forever.
+    if (options.initialPrompt) {
+      this.inputQueue.push({
+        type: 'user',
+        session_id: options.resumeSessionId ?? '',
+        parent_tool_use_id: null,
+        message: { role: 'user', content: options.initialPrompt },
+      });
+    }
+
     const canUseTool: CanUseTool = (toolName, input, opts) =>
       this.handlePermission(toolName, input, opts);
+
+    const perm = (options.permissionMode ?? 'default') as PermissionMode;
 
     this.queryInstance = sdkQuery({
       prompt: this.inputQueue,
       options: {
         cwd: options.cwd,
         resume: options.resumeSessionId,
-        permissionMode: 'default',
+        continue: options.continueSession,
+        forkSession: options.forkSession,
+        permissionMode: perm,
+        allowDangerouslySkipPermissions: perm === 'bypassPermissions',
         systemPrompt: { type: 'preset', preset: 'claude_code' },
-        settingSources: ['project'],
+        settingSources: ['user', 'project', 'local'],
         canUseTool,
+        model: options.model,
+        maxTurns: options.maxTurns,
+        maxBudgetUsd: options.maxBudgetUsd,
+        allowedTools: options.allowedTools,
+        disallowedTools: options.disallowedTools,
+        additionalDirectories: options.additionalDirectories,
+        agent: options.agent,
+        agents: options.agents as Record<string, import('@anthropic-ai/claude-agent-sdk').AgentDefinition> | undefined,
+        mcpServers: options.mcpServers as Record<string, import('@anthropic-ai/claude-agent-sdk').McpServerConfig> | undefined,
+        plugins: options.plugins,
+        enableFileCheckpointing: options.enableFileCheckpointing,
+        sandbox: options.sandbox as import('@anthropic-ai/claude-agent-sdk').SandboxSettings | undefined,
+        debug: options.debug,
+        debugFile: options.debugFile,
       },
     });
 
@@ -119,8 +152,27 @@ export class ClaudeRemoteSession implements ProviderSession {
     return this.sessionId;
   }
 
+  /** Wait for session_id from SDK (timeout after 30s). */
   async waitForReady(): Promise<void> {
-    await this.readyPromise;
+    const TIMEOUT_MS = 30_000;
+    const timeout = new Promise<never>((_, reject) => {
+      setTimeout(() => {
+        reject(
+          new Error(
+            `SDK did not send session_id within ${TIMEOUT_MS / 1000}s. ` +
+            'The connection may have failed. Check API key and network.',
+          ),
+        );
+      }, TIMEOUT_MS);
+    });
+
+    try {
+      await Promise.race([this.readyPromise, timeout]);
+    } catch (err) {
+      // Timeout or other error — tear down the stream
+      this.queryInstance.close();
+      throw err;
+    }
   }
 
   get pid(): number {

@@ -218,7 +218,18 @@ export class SessionManager extends EventEmitter {
    */
   async resume(
     sessionId: string,
-    options: { mode: SessionMode },
+    options: {
+      mode: SessionMode;
+      permissionMode?: string;
+      model?: string;
+      maxTurns?: number;
+      maxBudgetUsd?: number;
+      allowedTools?: string[];
+      disallowedTools?: string[];
+      initialPrompt?: string;
+      forkSession?: boolean;
+      debug?: boolean;
+    },
   ): Promise<ProviderSession> {
     const existing = this.sessions.get(sessionId);
     const providerName = existing?.provider;
@@ -231,6 +242,15 @@ export class SessionManager extends EventEmitter {
     const newSession = await provider.resume(sessionId, {
       cwd,
       mode: options.mode,
+      permissionMode: options.permissionMode,
+      model: options.model,
+      maxTurns: options.maxTurns,
+      maxBudgetUsd: options.maxBudgetUsd,
+      allowedTools: options.allowedTools,
+      disallowedTools: options.disallowedTools,
+      initialPrompt: options.initialPrompt,
+      forkSession: options.forkSession,
+      debug: options.debug,
     });
 
     this.sessions.set(sessionId, newSession);
@@ -632,6 +652,13 @@ export class SessionManager extends EventEmitter {
       }
       this.lastActivityTimes.set(session.id, msg.timestamp || Date.now());
       this.emit('message', session.id, msg);
+      // Diagnostic: confirm message forwarding path
+      if (this.listenerCount('message') === 0) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[SessionManager] message emitted for "${session.id}" but NO listeners registered`,
+        );
+      }
     });
   }
 
