@@ -15,6 +15,7 @@ import { ClaudeSDKProvider, CodexMCPProvider } from './providers/index.js';
 import { EventBus } from './event-bus.js';
 import { AuditLogger } from './audit.js';
 import { HealthChecker } from './health.js';
+import { TelegramPushAdapter } from './push/telegram-push-adapter.js';
 import { summarizeSession, formatSummaryText } from './summary.js';
 import { parseCommand } from './commands.js';
 import type { CallerContext, SessionMessage } from './types/index.js';
@@ -106,6 +107,36 @@ const happyclawPlugin = {
     const healthChecker = new HealthChecker(manager, { intervalMs: 30_000 });
     healthChecker.start();
 
+    // Telegram push adapter (direct push, zero agent token)
+    let pushAdapter: TelegramPushAdapter | undefined;
+    const tgBotToken = config.telegramBotToken as string | undefined;
+    const tgChatId = config.telegramDefaultChatId as string | undefined;
+
+    if (tgBotToken && tgChatId) {
+      pushAdapter = new TelegramPushAdapter(
+        {
+          botToken: tgBotToken,
+          defaultChatId: tgChatId,
+          debounceMs: (config.telegramDebounceMs as number) ?? 1500,
+        },
+        logger,
+      );
+
+      // Wire: SessionManager messages → push adapter
+      manager.on('message', (sessionId: string, msg: SessionMessage) => {
+        pushAdapter!.handleMessage(sessionId, msg);
+      });
+
+      // Wire: EventBus events → push adapter
+      eventBus.subscribeAll((events) => {
+        pushAdapter!.handleEvents(events);
+      });
+
+      logger.info(
+        `Telegram push enabled → chat ${tgChatId}`,
+      );
+    }
+
     // --- Register tools via factory (captures per-agent caller context) ---
     api.registerTool(
       (ctx: OpenClawPluginToolContext) => {
@@ -113,7 +144,7 @@ const happyclawPlugin = {
           userId: ctx.agentAccountId ?? 'anonymous',
           channelId: ctx.messageChannel ?? 'unknown',
         };
-        return createOpenClawTools(manager, auditLogger, caller);
+        return createOpenClawTools(manager, auditLogger, caller, pushAdapter);
       },
     );
 
@@ -158,6 +189,7 @@ const happyclawPlugin = {
     // --- Cleanup on gateway shutdown ---
     api.on('gateway_stop', async () => {
       healthChecker.stop();
+      pushAdapter?.dispose();
       eventBus.dispose();
       const sessions = manager.list();
       for (const session of sessions) {
@@ -182,6 +214,7 @@ function createOpenClawTools(
   manager: SessionManager,
   audit: AuditLogger,
   caller: CallerContext,
+  pushAdapter?: TelegramPushAdapter,
 ) {
   /** Fire-and-forget audit */
   const log = (
@@ -275,6 +308,9 @@ function createOpenClawTools(
           caller.userId,
         );
 
+        // Bind push adapter so Claude output goes directly to TG
+        pushAdapter?.bindSession(session.id);
+
         log('spawn', session.id, {
           provider: params.provider,
           cwd: params.cwd,
@@ -285,7 +321,10 @@ function createOpenClawTools(
           cwd: session.cwd,
           mode: session.mode,
           pid: session.pid,
-          message: 'Session started. Use session_send to interact.',
+          pushEnabled: !!pushAdapter,
+          message: pushAdapter
+            ? 'Session started. Claude output will be pushed directly to Telegram.'
+            : 'Session started. Use session_send to interact.',
         });
       },
     },
@@ -312,6 +351,8 @@ function createOpenClawTools(
           mode: (params.mode as 'local' | 'remote') ?? 'remote',
         });
 
+        pushAdapter?.bindSession(session.id);
+
         log('resume', sessionId);
         return textResult({
           id: session.id,
@@ -319,6 +360,7 @@ function createOpenClawTools(
           cwd: session.cwd,
           mode: session.mode,
           pid: session.pid,
+          pushEnabled: !!pushAdapter,
           message: 'Session resumed.',
         });
       },
@@ -513,6 +555,9 @@ function createOpenClawTools(
         manager.acl.assertOwner(caller.userId, sessionId);
 
         await manager.stop(sessionId, params.force as boolean | undefined);
+
+        // Unbind push adapter (flushes remaining messages)
+        pushAdapter?.unbindSession(sessionId);
 
         log('stop', sessionId, { force: params.force });
         return textResult({ message: 'Session stopped.' });
