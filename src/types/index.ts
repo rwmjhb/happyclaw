@@ -200,6 +200,13 @@ export interface ProviderSession {
 
   /** Register real-time message listener (remote mode) */
   onMessage(handler: MessageHandler): void;
+
+  /**
+   * Wait until the session is ready (has a valid ID from the backend).
+   * Resolves immediately for providers whose ID is known at construction.
+   * Remote SDK sessions resolve once the first message with session_id arrives.
+   */
+  waitForReady?(): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------

@@ -20,6 +20,7 @@ describe('Mode switching (enhanced)', () => {
       cwdWhitelist: [],
       maxSessions: 10,
       drainTimeoutMs: 100, // Short timeout for fast tests
+      headless: false,
     });
     mockProvider = createMockProvider('claude');
     manager.registerProvider(mockProvider);
@@ -253,6 +254,7 @@ describe('Mode switching (enhanced)', () => {
         maxSessions: 10,
         drainTimeoutMs: 100,
         persistence: mockPersistence as any,
+        headless: false,
       });
       persistManager.registerProvider(mockProvider);
 
@@ -290,6 +292,7 @@ describe('Mode switching (enhanced)', () => {
         maxSessions: 10,
         drainTimeoutMs: 100,
         persistence: mockPersistence as any,
+        headless: false,
       });
       persistManager.registerProvider(mockProvider);
 

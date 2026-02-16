@@ -44,6 +44,7 @@ describe('Full-stack integration', () => {
       cwdWhitelist: [],
       maxSessions: 10,
       drainTimeoutMs: 100,
+      headless: false,
     });
 
     claudeProvider = createMockProvider('claude');

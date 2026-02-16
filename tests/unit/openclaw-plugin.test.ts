@@ -265,7 +265,7 @@ describe('createOpenClawTools', () => {
 
   beforeEach(async () => {
     acl = new SessionACL();
-    manager = new SessionManager({ acl, cwdWhitelist: [], maxSessions: 10 });
+    manager = new SessionManager({ acl, cwdWhitelist: [], maxSessions: 10, headless: false });
     mockProvider = createMockProvider('claude');
     manager.registerProvider(mockProvider);
 

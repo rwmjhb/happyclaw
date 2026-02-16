@@ -24,6 +24,7 @@ describe('Plugin tools', () => {
       acl,
       cwdWhitelist: [],
       maxSessions: 10,
+      headless: false,
     });
     mockProvider = createMockProvider('claude');
     manager.registerProvider(mockProvider);

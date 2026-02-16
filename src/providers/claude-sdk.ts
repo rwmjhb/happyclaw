@@ -86,7 +86,14 @@ export class ClaudeRemoteSession implements ProviderSession {
 
   private listeningPromise: Promise<void>;
 
+  /** Resolves when session_id is received from the SDK */
+  private readyResolve!: () => void;
+  private readyPromise: Promise<void>;
+
   constructor(options: SpawnOptions) {
+    this.readyPromise = new Promise<void>((resolve) => {
+      this.readyResolve = resolve;
+    });
     this.cwd = options.cwd;
     this.inputQueue = new AsyncQueue<SDKUserMessage>();
 
@@ -110,6 +117,10 @@ export class ClaudeRemoteSession implements ProviderSession {
 
   get id(): string {
     return this.sessionId;
+  }
+
+  async waitForReady(): Promise<void> {
+    await this.readyPromise;
   }
 
   get pid(): number {
@@ -238,6 +249,10 @@ export class ClaudeRemoteSession implements ProviderSession {
           timestamp: Date.now(),
         });
       }
+    } finally {
+      // Resolve ready promise even if no session_id was received
+      // (prevents waitForReady from hanging forever on early failure)
+      this.readyResolve();
     }
   }
 
@@ -245,6 +260,7 @@ export class ClaudeRemoteSession implements ProviderSession {
     // Extract session_id from any message that has it
     if ('session_id' in msg && msg.session_id && !this.sessionId) {
       this.sessionId = msg.session_id;
+      this.readyResolve();
     }
 
     switch (msg.type) {

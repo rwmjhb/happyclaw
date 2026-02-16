@@ -17,6 +17,7 @@ describe('SessionManager', () => {
       acl,
       cwdWhitelist: [],
       maxSessions: 3,
+      headless: false,
     });
     mockProvider = createMockProvider('claude');
     manager.registerProvider(mockProvider);
@@ -77,6 +78,7 @@ describe('SessionManager', () => {
         acl,
         cwdWhitelist: ['/allowed-dir'],
         maxSessions: 10,
+        headless: false,
       });
       restricted.registerProvider(mockProvider);
 
@@ -97,6 +99,43 @@ describe('SessionManager', () => {
           'user-1',
         ),
       ).rejects.toThrow(/unknown provider/i);
+    });
+
+    it('rejects local mode when headless', async () => {
+      const headlessManager = new SessionManager({
+        acl,
+        cwdWhitelist: [],
+        maxSessions: 3,
+        headless: true,
+      });
+      headlessManager.registerProvider(mockProvider);
+
+      await expect(
+        headlessManager.spawn(
+          'claude',
+          { cwd: '/tmp/test', mode: 'local' },
+          'user-1',
+        ),
+      ).rejects.toThrow(/terminal.*TTY/i);
+    });
+
+    it('allows remote mode when headless', async () => {
+      const headlessManager = new SessionManager({
+        acl,
+        cwdWhitelist: [],
+        maxSessions: 3,
+        headless: true,
+      });
+      headlessManager.registerProvider(mockProvider);
+      const mockSession = createMockSession({ id: 'headless-remote' });
+      mockProvider._setNextSession(mockSession);
+
+      const session = await headlessManager.spawn(
+        'claude',
+        { cwd: '/tmp/test', mode: 'remote' },
+        'user-1',
+      );
+      expect(session.id).toBe('headless-remote');
     });
 
     it('attaches event and message listeners', async () => {
@@ -236,6 +275,28 @@ describe('SessionManager', () => {
   });
 
   describe('switchMode', () => {
+    it('rejects switch to local when headless', async () => {
+      const headlessManager = new SessionManager({
+        acl,
+        cwdWhitelist: [],
+        maxSessions: 3,
+        headless: true,
+      });
+      headlessManager.registerProvider(mockProvider);
+
+      const mockSession = createMockSession({ id: 'headless-switch' });
+      mockProvider._setNextSession(mockSession);
+      await headlessManager.spawn(
+        'claude',
+        { cwd: '/tmp/test', mode: 'remote' },
+        'user-1',
+      );
+
+      await expect(
+        headlessManager.switchMode('headless-switch', 'local'),
+      ).rejects.toThrow(/terminal.*TTY/i);
+    });
+
     it('transitions running -> draining -> switching -> running on success', async () => {
       const mockSession = createMockSession({ id: 'switch-1' });
       mockProvider._setNextSession(mockSession);

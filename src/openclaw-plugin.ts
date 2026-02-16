@@ -79,6 +79,7 @@ const happyclawPlugin = {
     const manager = new SessionManager({
       maxSessions: (config.maxSessions as number) ?? 10,
       cwdWhitelist: (config.cwdWhitelist as string[]) ?? [],
+      headless: true, // OpenClaw gateway is always headless
     });
 
     // Register available providers

@@ -16,6 +16,7 @@ describe('Provider registration', () => {
       acl,
       cwdWhitelist: [],
       maxSessions: 10,
+      headless: false,
     });
   });
 

@@ -51,6 +51,8 @@ export interface SessionManagerOptions {
   drainTimeoutMs?: number;
   /** Session persistence layer (optional, enables auto-save) */
   persistence?: SessionPersistence;
+  /** Block local mode when true (default: auto-detect from TTY) */
+  headless?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -68,6 +70,7 @@ export class SessionManager extends EventEmitter {
   private readonly cwdWhitelist: CwdWhitelist;
   private readonly drainTimeoutMs: number;
   private readonly persistence: SessionPersistence | undefined;
+  private readonly headless: boolean;
   readonly acl: ISessionACL;
 
   constructor(options: SessionManagerOptions = {}) {
@@ -77,6 +80,7 @@ export class SessionManager extends EventEmitter {
     this.acl = options.acl ?? new SessionACL();
     this.drainTimeoutMs = options.drainTimeoutMs ?? 30_000;
     this.persistence = options.persistence;
+    this.headless = options.headless ?? !process.stdout.isTTY;
   }
 
   // -------------------------------------------------------------------------
@@ -157,6 +161,13 @@ export class SessionManager extends EventEmitter {
     }
 
     // Security checks
+    // Block local mode in headless environments (no TTY)
+    if (options.mode === 'local' && this.headless) {
+      throw new Error(
+        'Local mode requires a terminal (TTY). Use mode="remote" for headless environments like Telegram or Discord.',
+      );
+    }
+
     const resolvedCwd = path.resolve(options.cwd);
     this.cwdWhitelist.assertAllowed(resolvedCwd);
 
@@ -170,6 +181,13 @@ export class SessionManager extends EventEmitter {
       ...options,
       cwd: resolvedCwd,
     });
+
+    // Wait for session ID to be established (SDK sessions get their ID
+    // asynchronously from the first message). Without this, all map keys
+    // would be '' and subsequent lookups by real ID would fail.
+    if (session.waitForReady) {
+      await session.waitForReady();
+    }
 
     this.sessions.set(session.id, session);
     this.switchStates.set(session.id, 'running');
@@ -440,6 +458,13 @@ export class SessionManager extends EventEmitter {
     sessionId: string,
     target: SessionMode,
   ): Promise<void> {
+    // Block local mode in headless environments (no TTY)
+    if (target === 'local' && this.headless) {
+      throw new Error(
+        'Local mode requires a terminal (TTY). Use mode="remote" for headless environments like Telegram or Discord.',
+      );
+    }
+
     const session = this.sessions.get(sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
