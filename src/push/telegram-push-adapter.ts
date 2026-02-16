@@ -134,8 +134,8 @@ export class TelegramPushAdapter {
           break;
         }
         case 'task_complete':
-          text = `*Task Complete*\n${event.summary}`;
-          break;
+          // Skip — the final assistant text was already pushed via handleMessage.
+          continue;
         case 'error':
           text = `*Error*\n${event.summary}`;
           break;

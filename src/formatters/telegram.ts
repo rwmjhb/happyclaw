@@ -11,17 +11,34 @@ import { redactSensitive } from '../redact.js';
 const MAX_LENGTH = 4000;
 const MAX_CHUNKS = 3;
 
-/** Format a single message to Telegram markdown */
+// Tools whose raw output is noise for TG users (internal bookkeeping, etc.)
+const SILENT_TOOLS = new Set([
+  'TodoWrite', 'TodoRead', 'Task', 'TaskCreate', 'TaskUpdate', 'TaskList',
+  'TaskGet', 'EnterPlanMode', 'ExitPlanMode', 'Skill',
+]);
+
+/** Format a single message to Telegram markdown. Returns '' to skip. */
 function formatMessage(msg: SessionMessage): string {
   switch (msg.type) {
     case 'code':
       return `\`\`\`${msg.metadata?.language ?? ''}\n${msg.content}\n\`\`\`\n`;
-    case 'tool_use':
-      return `*Tool:* \`${msg.metadata?.tool ?? 'unknown'}\`\n${msg.content}\n`;
-    case 'tool_result':
+    case 'tool_use': {
+      const tool = msg.metadata?.tool ?? 'unknown';
+      // Silent tools: skip entirely
+      if (SILENT_TOOLS.has(tool)) return '';
+      // Other tools: show tool name only, truncate content to avoid JSON spam
+      const preview = msg.content.length > 120
+        ? msg.content.slice(0, 117) + '...'
+        : msg.content;
+      return `*Tool:* \`${tool}\`\n${preview}\n`;
+    }
+    case 'tool_result': {
+      // Skip long results (likely raw JSON output), show short ones
+      if (msg.content.length > 200) return '';
       return `*Result:* ${msg.content}\n`;
+    }
     case 'thinking':
-      return `_Thinking..._\n`;
+      return '';  // Skip thinking — noise in TG
     case 'error':
       return `*Error:* ${msg.content}\n`;
     case 'result':
@@ -58,7 +75,9 @@ export function formatForTelegram(messages: SessionMessage[]): string[] {
   let current = '';
 
   for (const msg of messages) {
-    const formatted = redactSensitive(formatMessage(msg));
+    const raw = formatMessage(msg);
+    if (!raw) continue;  // Filtered out (silent tool, thinking, etc.)
+    const formatted = redactSensitive(raw);
     if (current.length + formatted.length > MAX_LENGTH) {
       if (current) chunks.push(current);
       current = formatted.length > MAX_LENGTH

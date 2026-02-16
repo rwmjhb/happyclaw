@@ -210,7 +210,7 @@ describe('TelegramPushAdapter', () => {
       expect(body.text).toContain('req-123');
     });
 
-    it('should push task_complete events', async () => {
+    it('should skip task_complete events (already covered by assistant text)', async () => {
       adapter.bindSession('sess-1');
       adapter.handleEvents([
         makeEvent({
@@ -222,10 +222,7 @@ describe('TelegramPushAdapter', () => {
 
       await vi.runAllTimersAsync();
 
-      expect(mockFetch).toHaveBeenCalledOnce();
-      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
-      expect(body.text).toContain('Task Complete');
-      expect(body.text).toContain('All tests passed');
+      expect(mockFetch).not.toHaveBeenCalled();
     });
 
     it('should push error events', async () => {

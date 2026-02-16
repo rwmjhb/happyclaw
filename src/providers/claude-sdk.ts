@@ -397,16 +397,19 @@ export class ClaudeRemoteSession implements ProviderSession {
     if (msg.type !== 'result') return;
 
     const isSuccess = msg.subtype === 'success';
-    const resultText =
-      isSuccess && 'result' in msg ? String(msg.result) : `Error: ${msg.subtype}`;
 
-    const sessionMsg: SessionMessage = {
-      type: 'result',
-      content: resultText,
-      timestamp: Date.now(),
-      metadata: { sdkMessageId: msg.uuid },
-    };
-    this.bufferAndEmit(sessionMsg);
+    // SDK result.result duplicates the last assistant text block, so only
+    // emit a SessionMessage for errors. The assistant text was already
+    // emitted via handleAssistantMessage().
+    if (!isSuccess) {
+      const sessionMsg: SessionMessage = {
+        type: 'result',
+        content: `Error: ${msg.subtype}`,
+        timestamp: Date.now(),
+        metadata: { sdkMessageId: msg.uuid },
+      };
+      this.bufferAndEmit(sessionMsg);
+    }
 
     this.emitEvent({
       type: 'task_complete',
