@@ -14,6 +14,7 @@
  * Reference: docs/technical-proposal.md §3.3.4
  */
 
+import { existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 
@@ -170,6 +171,15 @@ export class SessionManager extends EventEmitter {
 
     const resolvedCwd = path.resolve(options.cwd);
     this.cwdWhitelist.assertAllowed(resolvedCwd);
+
+    // Ensure cwd exists — child_process.spawn reports ENOENT (misleadingly
+    // attributed to the binary path) when cwd is missing.
+    if (!existsSync(resolvedCwd)) {
+      throw new Error(
+        `Working directory does not exist: ${resolvedCwd}. ` +
+        'Create the directory before spawning a session.',
+      );
+    }
 
     if (this.sessions.size >= this.maxSessions) {
       throw new Error(

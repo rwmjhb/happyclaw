@@ -15,6 +15,8 @@
  */
 
 import { execSync, spawn as spawnChild, type ChildProcess } from 'node:child_process';
+import { existsSync, readlinkSync, readdirSync } from 'node:fs';
+import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
@@ -48,17 +50,125 @@ const PERMISSION_TIMEOUT = 300_000;
 
 let resolvedCodexPath: string | undefined;
 
+// ---------------------------------------------------------------------------
+// Platform triple for native binary resolution
+// ---------------------------------------------------------------------------
+
+const PLATFORM_TRIPLES: Record<string, string> = {
+  'darwin-arm64': 'aarch64-apple-darwin',
+  'darwin-x64': 'x86_64-apple-darwin',
+  'linux-arm64': 'aarch64-unknown-linux-musl',
+  'linux-x64': 'x86_64-unknown-linux-musl',
+};
+
+/**
+ * Given the npm wrapper path (e.g. `~/.nvm/versions/node/v24/bin/codex`),
+ * resolve through the package structure to the actual Rust binary.
+ *
+ * Layout (npm):
+ *   .../bin/codex  →  symlink to ../lib/node_modules/@openai/codex/bin/codex.js
+ *   .../lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/
+ *     vendor/<triple>/codex/codex   ← actual Mach-O / ELF binary
+ */
+function resolveNativeBinary(wrapperPath: string): string | null {
+  const triple = PLATFORM_TRIPLES[`${process.platform}-${process.arch}`];
+  if (!triple) return null;
+
+  const binaryName = process.platform === 'win32' ? 'codex.exe' : 'codex';
+  const platformPkg = `codex-${process.platform}-${process.arch}`;
+
+  // Follow symlink to find the package root
+  let realBin: string;
+  try {
+    // bin/codex → ../lib/node_modules/@openai/codex/bin/codex.js
+    realBin = path.resolve(path.dirname(wrapperPath), readlinkSync(wrapperPath));
+  } catch {
+    realBin = wrapperPath;
+  }
+  const packageRoot = path.resolve(path.dirname(realBin), '..');
+
+  // Search for native binary in known locations
+  const candidates = [
+    // npm hoists optionalDeps into nested node_modules
+    path.join(packageRoot, 'node_modules', '@openai', platformPkg, 'vendor', triple, 'codex', binaryName),
+    // Vendor directory fallback (some install methods)
+    path.join(packageRoot, 'vendor', triple, 'codex', binaryName),
+  ];
+
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+/**
+ * Resolve the full path to the `codex` binary.
+ *
+ * LaunchAgent processes have a minimal PATH and no nvm — the npm wrapper
+ * script (`#!/usr/bin/env node`) can't find node. We bypass the wrapper
+ * entirely and locate the native Rust binary directly.
+ *
+ * Strategy:
+ *  1. Shell resolution → find npm wrapper → resolve through to native binary
+ *  2. Direct NVM scan → find npm wrapper → resolve through to native binary
+ *  3. Bare `codex` fallback (relies on ambient PATH)
+ */
 function resolveCodexPath(): string {
   if (resolvedCodexPath !== undefined) return resolvedCodexPath;
-  try {
-    const shell = process.env.SHELL || '/bin/zsh';
-    resolvedCodexPath = execSync(`${shell} -lc 'which codex'`, {
-      encoding: 'utf8',
-      timeout: 5000,
-    }).trim();
-  } catch {
-    resolvedCodexPath = 'codex'; // fallback to bare command
+
+  const shell = process.env.SHELL || '/bin/zsh';
+
+  // Strategy 1: shell-based resolution → native binary
+  for (const flags of ['-lic', '-lc']) {
+    try {
+      const raw = execSync(`${shell} ${flags} 'command -v codex'`, {
+        encoding: 'utf8',
+        timeout: 5000,
+        stdio: ['pipe', 'pipe', 'pipe'], // suppress stderr noise
+      }).trim();
+      // Interactive shell may print prompts — take only the last non-empty line
+      const lastLine = raw.split('\n').filter(Boolean).pop() ?? '';
+      if (lastLine && lastLine.startsWith('/') && !lastLine.includes('not found')) {
+        // Try to resolve through to native binary (skip Node wrapper)
+        const native = resolveNativeBinary(lastLine);
+        if (native) {
+          resolvedCodexPath = native;
+          return resolvedCodexPath;
+        }
+        // Fallback: use wrapper path (requires node in PATH)
+        resolvedCodexPath = lastLine;
+        return resolvedCodexPath;
+      }
+    } catch {
+      // continue to next strategy
+    }
   }
+
+  // Strategy 2: scan NVM directories directly
+  const nvmDir = process.env.NVM_DIR || path.join(process.env.HOME || '', '.nvm');
+  try {
+    const versionsDir = path.join(nvmDir, 'versions', 'node');
+    if (existsSync(versionsDir)) {
+      const versions = readdirSync(versionsDir).sort().reverse(); // newest first
+      for (const ver of versions) {
+        const wrapper = path.join(versionsDir, ver, 'bin', 'codex');
+        if (existsSync(wrapper)) {
+          // Try to resolve through to native binary
+          const native = resolveNativeBinary(wrapper);
+          if (native) {
+            resolvedCodexPath = native;
+            return resolvedCodexPath;
+          }
+          resolvedCodexPath = wrapper;
+          return resolvedCodexPath;
+        }
+      }
+    }
+  } catch {
+    // continue to fallback
+  }
+
+  resolvedCodexPath = 'codex'; // bare fallback
   return resolvedCodexPath;
 }
 
@@ -71,6 +181,7 @@ function getCodexMcpSubcommand(): string {
     const version = execSync(`${resolveCodexPath()} --version`, {
       encoding: 'utf8',
       timeout: 5000,
+      stdio: ['pipe', 'pipe', 'pipe'],
     }).trim();
     const match = version.match(/codex-cli\s+(\d+)\.(\d+)\.(\d+)/);
     if (!match) return 'mcp-server';
@@ -90,6 +201,15 @@ function buildTransportEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (typeof value === 'string') env[key] = value;
+  }
+
+  // Ensure codex's bin directory is on PATH (launchd has minimal PATH)
+  const codexBin = resolveCodexPath();
+  if (codexBin.startsWith('/')) {
+    const binDir = path.dirname(codexBin);
+    if (!env.PATH?.includes(binDir)) {
+      env.PATH = binDir + (env.PATH ? ':' + env.PATH : '');
+    }
   }
 
   const filter = 'codex_core::rollout::list=off';
@@ -179,6 +299,7 @@ export class CodexMCPSession implements ProviderSession {
   private conversationId: string | null = null;
   private stopped = false;
   private abortController = new AbortController();
+  private readonly pendingId: string;
 
   // Permissions
   private pendingPermissions = new Map<
@@ -199,6 +320,7 @@ export class CodexMCPSession implements ProviderSession {
   constructor(options: SpawnOptions) {
     this.cwd = options.cwd;
     this.spawnOptions = options;
+    this.pendingId = `codex-pending-${Date.now()}`;
 
     this.readyPromise = new Promise<void>((resolve) => {
       this.readyResolve = resolve;
@@ -225,6 +347,7 @@ export class CodexMCPSession implements ProviderSession {
     // Register handlers before connecting
     this.registerEventHandler();
     this.registerPermissionHandler();
+    this.registerTransportHandlers();
 
     // Initialize: connect then optionally start session with initial prompt
     this.readyPromise = this.initialize(options);
@@ -233,7 +356,15 @@ export class CodexMCPSession implements ProviderSession {
   // --- ProviderSession interface -------------------------------------------
 
   get id(): string {
-    return this.codexSessionId ?? `codex-pending-${Date.now()}`;
+    // Always return the stable pendingId as the canonical external identifier.
+    // The real codexSessionId (set by extractIdentifiers) is only used
+    // internally for codex-reply MCP tool calls.
+    return this.pendingId;
+  }
+
+  /** The real session ID returned by the Codex MCP server (null until first tool response). */
+  get realSessionId(): string | null {
+    return this.codexSessionId;
   }
 
   get pid(): number {
@@ -351,31 +482,37 @@ export class CodexMCPSession implements ProviderSession {
   private async initialize(options: SpawnOptions): Promise<void> {
     try {
       await this.client.connect(this.transport);
-
-      this.emitEvent({
-        type: 'ready',
-        severity: 'info',
-        summary: 'Codex MCP session connected',
-        sessionId: this.id,
-        timestamp: Date.now(),
-      });
-
-      // If initial prompt provided, start the session immediately
-      if (options.initialPrompt) {
-        this.fireToolCall(() => this.startSession(options.initialPrompt!));
-      }
-
-      this.readyResolve();
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
       this.emitEvent({
         type: 'error',
         severity: 'urgent',
-        summary: `Codex MCP init failed: ${err instanceof Error ? err.message : String(err)}`,
+        summary: `Codex MCP init failed: ${msg}`,
         sessionId: this.id,
         timestamp: Date.now(),
       });
-      this.readyResolve(); // resolve to prevent hanging
+      // Propagate so waitForReady() / spawn() can surface the error
+      throw new Error(
+        `Failed to connect to Codex MCP server. ` +
+        `Is codex installed? Resolved path: ${resolveCodexPath()}. ` +
+        `Error: ${msg}`,
+      );
     }
+
+    this.emitEvent({
+      type: 'ready',
+      severity: 'info',
+      summary: 'Codex MCP session connected',
+      sessionId: this.id,
+      timestamp: Date.now(),
+    });
+
+    // If initial prompt provided, start the session immediately
+    if (options.initialPrompt) {
+      this.fireToolCall(() => this.startSession(options.initialPrompt!));
+    }
+
+    this.readyResolve();
   }
 
   // --- Private: two-tool pattern -------------------------------------------
@@ -697,6 +834,59 @@ export class CodexMCPSession implements ProviderSession {
 
       this.pendingPermissions.set(callId, { resolve, timer });
     });
+  }
+
+  // --- Private: transport lifecycle handlers --------------------------------
+
+  /**
+   * Monitor the child process stderr and exit for diagnostics.
+   * StdioClientTransport pipes stderr but nothing reads it by default —
+   * capture it so we know WHY the Codex process died.
+   */
+  private registerTransportHandlers(): void {
+    // stderr capture — Codex writes debug/error info here
+    this.transport.stderr?.on('data', (chunk: Buffer) => {
+      const text = chunk.toString().trim();
+      if (!text) return;
+
+      // eslint-disable-next-line no-console
+      console.error(`[Codex stderr] ${text}`);
+
+      // Surface fatal errors as session events
+      if (/error|fatal|panic|abort/i.test(text)) {
+        this.emitEvent({
+          type: 'error',
+          severity: 'warning',
+          summary: `Codex stderr: ${text.slice(0, 200)}`,
+          sessionId: this.id,
+          timestamp: Date.now(),
+        });
+      }
+    });
+
+    // Transport close — fires when child process exits
+    this.transport.onclose = () => {
+      if (this.stopped) return; // expected after stop()
+      this.emitEvent({
+        type: 'error',
+        severity: 'urgent',
+        summary: 'Process exited: Codex MCP server terminated unexpectedly',
+        sessionId: this.id,
+        timestamp: Date.now(),
+      });
+    };
+
+    // Transport error
+    this.transport.onerror = (err: Error) => {
+      if (this.stopped) return;
+      this.emitEvent({
+        type: 'error',
+        severity: 'urgent',
+        summary: `Process error: Codex MCP transport error: ${err.message}`,
+        sessionId: this.id,
+        timestamp: Date.now(),
+      });
+    };
   }
 
   // --- Private: session ID extraction (defensive) --------------------------

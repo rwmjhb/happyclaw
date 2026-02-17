@@ -174,21 +174,21 @@ describe('SessionManager', () => {
 
   describe('list', () => {
     it('returns all sessions without filter', async () => {
-      const s1 = createMockSession({ id: 'list-1', cwd: '/a' });
+      const s1 = createMockSession({ id: 'list-1', cwd: '/tmp/a' });
       mockProvider._setNextSession(s1);
       await manager.spawn(
         'claude',
-        { cwd: '/a', mode: 'remote' },
+        { cwd: '/tmp/a', mode: 'remote' },
         'user-1',
       );
 
       const codexProvider = createMockProvider('codex');
-      const s2 = createMockSession({ id: 'list-2', cwd: '/b', provider: 'codex' });
+      const s2 = createMockSession({ id: 'list-2', cwd: '/tmp/b', provider: 'codex' });
       codexProvider._setNextSession(s2);
       manager.registerProvider(codexProvider);
       await manager.spawn(
         'codex',
-        { cwd: '/b', mode: 'remote' },
+        { cwd: '/tmp/b', mode: 'remote' },
         'user-1',
       );
 

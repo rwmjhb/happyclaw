@@ -67,6 +67,7 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => {
 vi.mock('@modelcontextprotocol/sdk/client/stdio.js', () => {
   const MockTransport = function (this: any) {
     this.pid = 12345;
+    this.stderr = new EventEmitter();
   } as any;
 
   return { StdioClientTransport: MockTransport };
@@ -681,7 +682,9 @@ describe('CodexMCPSession', () => {
       await session.send('test');
       await vi.advanceTimersByTimeAsync(0);
 
-      expect(session.id).toBe('from-root');
+      // id stays stable (pendingId), real ID stored internally
+      expect(session.id).toMatch(/^codex-pending-/);
+      expect(session.realSessionId).toBe('from-root');
     });
 
     it('extracts from tool response meta', async () => {
@@ -693,7 +696,8 @@ describe('CodexMCPSession', () => {
       await session.send('test');
       await vi.advanceTimersByTimeAsync(0);
 
-      expect(session.id).toBe('from-meta');
+      expect(session.id).toMatch(/^codex-pending-/);
+      expect(session.realSessionId).toBe('from-meta');
     });
 
     it('extracts from tool response content items', async () => {
@@ -704,7 +708,8 @@ describe('CodexMCPSession', () => {
       await session.send('test');
       await vi.advanceTimersByTimeAsync(0);
 
-      expect(session.id).toBe('from-content');
+      expect(session.id).toMatch(/^codex-pending-/);
+      expect(session.realSessionId).toBe('from-content');
     });
 
     it('extracts from events with snake_case', () => {
@@ -715,7 +720,8 @@ describe('CodexMCPSession', () => {
         conversation_id: 'snake-conv',
       });
 
-      expect(session.id).toBe('snake-sess');
+      expect(session.id).toMatch(/^codex-pending-/);
+      expect(session.realSessionId).toBe('snake-sess');
     });
 
     it('extracts from events with camelCase', () => {
@@ -726,7 +732,8 @@ describe('CodexMCPSession', () => {
         conversationId: 'camel-conv',
       });
 
-      expect(session.id).toBe('camel-sess');
+      expect(session.id).toMatch(/^codex-pending-/);
+      expect(session.realSessionId).toBe('camel-sess');
     });
 
     it('extracts from nested event.data', () => {
@@ -736,7 +743,8 @@ describe('CodexMCPSession', () => {
         data: { session_id: 'nested-sess' },
       });
 
-      expect(session.id).toBe('nested-sess');
+      expect(session.id).toMatch(/^codex-pending-/);
+      expect(session.realSessionId).toBe('nested-sess');
     });
 
     it('prefers threadId over sessionId in tool response (Codex >= 0.98)', async () => {
@@ -749,7 +757,8 @@ describe('CodexMCPSession', () => {
       await session.send('test');
       await vi.advanceTimersByTimeAsync(0);
 
-      expect(session.id).toBe('thread-abc');
+      expect(session.id).toMatch(/^codex-pending-/);
+      expect(session.realSessionId).toBe('thread-abc');
     });
 
     it('prefers thread_id over session_id in events', () => {
@@ -760,7 +769,8 @@ describe('CodexMCPSession', () => {
         session_id: 'sess-from-event',
       });
 
-      expect(session.id).toBe('thread-from-event');
+      expect(session.id).toMatch(/^codex-pending-/);
+      expect(session.realSessionId).toBe('thread-from-event');
     });
 
     it('extracts threadId from response meta', async () => {
@@ -772,7 +782,8 @@ describe('CodexMCPSession', () => {
       await session.send('test');
       await vi.advanceTimersByTimeAsync(0);
 
-      expect(session.id).toBe('thread-meta');
+      expect(session.id).toMatch(/^codex-pending-/);
+      expect(session.realSessionId).toBe('thread-meta');
     });
   });
 

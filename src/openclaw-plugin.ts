@@ -362,36 +362,21 @@ function createOpenClawTools(
         agents: Type.Optional(
           Type.Unsafe({
             type: 'object',
-            description: 'Programmatic sub-agent definitions keyed by name',
-            additionalProperties: {
-              type: 'object',
-              properties: {
-                description: { type: 'string' },
-                prompt: { type: 'string' },
-                tools: { type: 'array', items: { type: 'string' } },
-                disallowedTools: { type: 'array', items: { type: 'string' } },
-                model: { type: 'string' },
-                maxTurns: { type: 'number' },
-              },
-              required: ['description', 'prompt'],
-            },
+            description:
+              'Programmatic sub-agent definitions keyed by agent name. ' +
+              'Each value is an object with required "description" (string) and "prompt" (string), ' +
+              'plus optional "tools" (string[]), "disallowedTools" (string[]), "model" (string), "maxTurns" (number). ' +
+              'Example: {"researcher": {"description": "Research agent", "prompt": "You are a researcher"}}',
           }),
         ),
         mcpServers: Type.Optional(
           Type.Unsafe({
             type: 'object',
             description:
-              'MCP server configs keyed by name. stdio: {command,args,env} or http: {type:"http",url}',
-            additionalProperties: {
-              type: 'object',
-              properties: {
-                command: { type: 'string' },
-                args: { type: 'array', items: { type: 'string' } },
-                env: { type: 'object', additionalProperties: { type: 'string' } },
-                type: { type: 'string' },
-                url: { type: 'string' },
-              },
-            },
+              'MCP server configs keyed by server name. ' +
+              'Each value is an object — stdio: {"command": string, "args": string[], "env": Record<string,string>} ' +
+              'or http: {"type": "http", "url": string}. ' +
+              'Example: {"myServer": {"command": "npx", "args": ["-y", "my-mcp"]}}',
           }),
         ),
         plugins: Type.Optional(
