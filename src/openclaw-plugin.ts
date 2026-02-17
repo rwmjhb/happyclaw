@@ -360,28 +360,38 @@ function createOpenClawTools(
           }),
         ),
         agents: Type.Optional(
-          Type.Record(Type.String(), Type.Object({
-            description: Type.String(),
-            prompt: Type.String(),
-            tools: Type.Optional(Type.Array(Type.String())),
-            disallowedTools: Type.Optional(Type.Array(Type.String())),
-            model: Type.Optional(Type.String()),
-            maxTurns: Type.Optional(Type.Number()),
-          }), {
-            description:
-              'Programmatic sub-agent definitions keyed by name',
+          Type.Unsafe({
+            type: 'object',
+            description: 'Programmatic sub-agent definitions keyed by name',
+            additionalProperties: {
+              type: 'object',
+              properties: {
+                description: { type: 'string' },
+                prompt: { type: 'string' },
+                tools: { type: 'array', items: { type: 'string' } },
+                disallowedTools: { type: 'array', items: { type: 'string' } },
+                model: { type: 'string' },
+                maxTurns: { type: 'number' },
+              },
+              required: ['description', 'prompt'],
+            },
           }),
         ),
         mcpServers: Type.Optional(
-          Type.Record(Type.String(), Type.Object({
-            command: Type.Optional(Type.String()),
-            args: Type.Optional(Type.Array(Type.String())),
-            env: Type.Optional(Type.Record(Type.String(), Type.String())),
-            type: Type.Optional(Type.String()),
-            url: Type.Optional(Type.String()),
-          }), {
+          Type.Unsafe({
+            type: 'object',
             description:
-              'MCP server configs keyed by name (stdio: {command,args,env} or http: {type:"http",url})',
+              'MCP server configs keyed by name. stdio: {command,args,env} or http: {type:"http",url}',
+            additionalProperties: {
+              type: 'object',
+              properties: {
+                command: { type: 'string' },
+                args: { type: 'array', items: { type: 'string' } },
+                env: { type: 'object', additionalProperties: { type: 'string' } },
+                type: { type: 'string' },
+                url: { type: 'string' },
+              },
+            },
           }),
         ),
         plugins: Type.Optional(
