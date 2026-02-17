@@ -112,6 +112,10 @@ export interface PermissionDetail {
   input: unknown;
   /** Human-readable reason from SDK (decisionReason) */
   decisionReason?: string;
+  /** Codex: command array from elicitation request */
+  command?: string[];
+  /** Codex: working directory from elicitation request */
+  cwd?: string;
 }
 
 /** Session event emitted by providers */

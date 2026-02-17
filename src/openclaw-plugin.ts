@@ -306,7 +306,11 @@ function createOpenClawTools(
         permissionMode: Type.Optional(
           Type.String({
             description:
-              'Permission mode: "default", "bypassPermissions", "acceptEdits", "plan", or "dontAsk"',
+              'Permission mode. For Claude: SDK permissionMode. ' +
+              'For Codex: maps to approval-policy + sandbox execution policy ' +
+              '(default→untrusted+workspace-write, bypassPermissions→never+danger-full-access, ' +
+              'acceptEdits→on-request+workspace-write, plan→untrusted+read-only). ' +
+              'Values: "default", "bypassPermissions", "acceptEdits", "plan", "dontAsk".',
           }),
         ),
         model: Type.Optional(
