@@ -150,7 +150,7 @@ Phase 3 将 Codex MCP 桥接（"待调研"，第 721/829 行）和 Gemini PTY �
 
 ### m-2. cwd 字符串严格匹配
 
-`SessionManager.list` 用 `s.cwd === filter.cwd`（第 459 行）做过滤。`~/projects/my-app` vs `/Users/pope/projects/my-app` vs symlink 路径会匹配失败。
+`SessionManager.list` 用 `s.cwd === filter.cwd`（第 459 行）做过滤。`~/projects/my-app` vs `$HOME/projects/my-app` vs symlink 路径会匹配失败。
 
 **建议**：使用 `path.resolve()` + `fs.realpathSync()` 标准化路径比较。
 

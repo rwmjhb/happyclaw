@@ -1191,7 +1191,7 @@ Happy Coder 是独立 CLI 工具，直接在用户终端运行，所以 stdio in
 | # | 问题 | 说明 |
 |---|------|------|
 | m-1 | `pty.*` 命名与架构不匹配 | 核心已是 SDK/MCP/PTY 混合，建议改为 `session.*` 或 `cli.*` |
-| m-2 | cwd 字符串严格匹配 | `~/projects` vs `/Users/pope/projects` vs symlink 会匹配失败，需 `path.resolve` + `realpathSync` |
+| m-2 | cwd 字符串严格匹配 | `~/projects` vs `$HOME/projects` vs symlink 会匹配失败，需 `path.resolve` + `realpathSync` |
 | m-3 | 输出摘要无完整获取机制 | "发 '查看完整输出' 获取全文" 无对应 API，需添加分页参数 |
 | m-4 | Discord 2000 字符限制未提及 | 方案只提了 Telegram 4096，需添加 Discord 适配 |
 | m-5 | 权限请求超时处理缺失 | 远程用户不回复时 `waitForPermissionResponse` 会无限等待。需可配置超时 + 默认 deny |
@@ -1377,7 +1377,7 @@ cursor 是什么格式？是递增整数、时间戳、还是 opaque token？过
 
 **来源**：Codex R3
 
-`resolvedCwd.startsWith(w)` 匹配 — 如果白名单是 `/Users/pope/projects`，则 `/Users/pope/projects-evil` 也会通过。应使用 `resolvedCwd === w || resolvedCwd.startsWith(w + path.sep)` 或 `realpath` 对比。
+`resolvedCwd.startsWith(w)` 匹配 — 如果白名单是 `/home/alice/projects`，则 `/home/alice/projects-evil` 也会通过。应使用 `resolvedCwd === w || resolvedCwd.startsWith(w + path.sep)` 或 `realpath` 对比。
 
 ### 12.3 实现就绪度评估（Round 3）
 

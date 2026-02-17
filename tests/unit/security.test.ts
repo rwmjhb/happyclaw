@@ -100,38 +100,38 @@ describe('SessionACL', () => {
 describe('CwdWhitelist', () => {
   describe('allowed path', () => {
     it('allows paths within whitelisted directories', () => {
-      const whitelist = new CwdWhitelist(['/Users/pope/projects']);
-      expect(whitelist.check('/Users/pope/projects/my-app')).toBe(true);
+      const whitelist = new CwdWhitelist(['/home/alice/projects']);
+      expect(whitelist.check('/home/alice/projects/my-app')).toBe(true);
     });
 
     it('allows the exact whitelisted directory', () => {
-      const whitelist = new CwdWhitelist(['/Users/pope/projects']);
-      expect(whitelist.check('/Users/pope/projects')).toBe(true);
+      const whitelist = new CwdWhitelist(['/home/alice/projects']);
+      expect(whitelist.check('/home/alice/projects')).toBe(true);
     });
 
     it('allows deeply nested paths', () => {
-      const whitelist = new CwdWhitelist(['/Users/pope/projects']);
+      const whitelist = new CwdWhitelist(['/home/alice/projects']);
       expect(
-        whitelist.check('/Users/pope/projects/app/src/components'),
+        whitelist.check('/home/alice/projects/app/src/components'),
       ).toBe(true);
     });
   });
 
   describe('denied path', () => {
     it('denies paths outside whitelisted directories', () => {
-      const whitelist = new CwdWhitelist(['/Users/pope/projects']);
+      const whitelist = new CwdWhitelist(['/home/alice/projects']);
       expect(whitelist.check('/etc/passwd')).toBe(false);
     });
 
     it('denies paths that partially match (prefix attack)', () => {
-      const whitelist = new CwdWhitelist(['/Users/pope/projects']);
-      // "/Users/pope/projects-evil" should NOT be allowed
-      expect(whitelist.check('/Users/pope/projects-evil')).toBe(false);
+      const whitelist = new CwdWhitelist(['/home/alice/projects']);
+      // "/home/alice/projects-evil" should NOT be allowed
+      expect(whitelist.check('/home/alice/projects-evil')).toBe(false);
     });
 
     it('denies paths in parent directories', () => {
-      const whitelist = new CwdWhitelist(['/Users/pope/projects']);
-      expect(whitelist.check('/Users/pope')).toBe(false);
+      const whitelist = new CwdWhitelist(['/home/alice/projects']);
+      expect(whitelist.check('/home/alice')).toBe(false);
     });
   });
 
@@ -140,38 +140,38 @@ describe('CwdWhitelist', () => {
       const whitelist = new CwdWhitelist([]);
       expect(whitelist.check('/etc/passwd')).toBe(true);
       expect(whitelist.check('/tmp')).toBe(true);
-      expect(whitelist.check('/Users/pope/projects')).toBe(true);
+      expect(whitelist.check('/home/alice/projects')).toBe(true);
     });
   });
 
   describe('path normalization', () => {
     it('resolves relative paths', () => {
-      const whitelist = new CwdWhitelist(['/Users/pope/projects']);
+      const whitelist = new CwdWhitelist(['/home/alice/projects']);
       // path.resolve will resolve this relative to process.cwd() — the key
-      // is that '../etc' with a base of /Users/pope/projects normalizes correctly
+      // is that '../etc' with a base of /home/alice/projects normalizes correctly
       // We just test that the whitelist itself normalizes its entries
-      expect(whitelist.check('/Users/pope/projects/app/../app/src')).toBe(
+      expect(whitelist.check('/home/alice/projects/app/../app/src')).toBe(
         true,
       );
     });
 
     it('handles path traversal attacks', () => {
-      const whitelist = new CwdWhitelist(['/Users/pope/projects']);
-      // /Users/pope/projects/../.ssh normalizes to /Users/pope/.ssh
-      expect(whitelist.check('/Users/pope/projects/../.ssh')).toBe(false);
+      const whitelist = new CwdWhitelist(['/home/alice/projects']);
+      // /home/alice/projects/../.ssh normalizes to /home/alice/.ssh
+      expect(whitelist.check('/home/alice/projects/../.ssh')).toBe(false);
     });
   });
 
   describe('assertAllowed', () => {
     it('does not throw for allowed paths', () => {
-      const whitelist = new CwdWhitelist(['/Users/pope/projects']);
+      const whitelist = new CwdWhitelist(['/home/alice/projects']);
       expect(() =>
-        whitelist.assertAllowed('/Users/pope/projects/my-app'),
+        whitelist.assertAllowed('/home/alice/projects/my-app'),
       ).not.toThrow();
     });
 
     it('throws for denied paths with descriptive message', () => {
-      const whitelist = new CwdWhitelist(['/Users/pope/projects']);
+      const whitelist = new CwdWhitelist(['/home/alice/projects']);
       expect(() => whitelist.assertAllowed('/etc/passwd')).toThrow(
         'cwd not in whitelist',
       );
@@ -181,10 +181,10 @@ describe('CwdWhitelist', () => {
   describe('multiple whitelist entries', () => {
     it('allows paths matching any entry', () => {
       const whitelist = new CwdWhitelist([
-        '/Users/pope/projects',
+        '/home/alice/projects',
         '/tmp/sandboxes',
       ]);
-      expect(whitelist.check('/Users/pope/projects/app')).toBe(true);
+      expect(whitelist.check('/home/alice/projects/app')).toBe(true);
       expect(whitelist.check('/tmp/sandboxes/test')).toBe(true);
       expect(whitelist.check('/var/log')).toBe(false);
     });
