@@ -6,6 +6,11 @@ import {
   formatAsEmbed,
   formatPermissionEmbed,
 } from '../../src/formatters/index.js';
+import {
+  cleanCodexCommand,
+  isDiffContent,
+  formatMessage,
+} from '../../src/formatters/telegram.js';
 
 const MAX_TELEGRAM_LENGTH = 4000;
 const MAX_DISCORD_LENGTH = 1900;
@@ -400,5 +405,151 @@ describe('formatPermissionEmbed', () => {
     expect(embed.description).toBe('Generic permission');
     // No tool/input fields
     expect(embed.fields?.find((f) => f.name === 'Tool')).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Codex-specific formatter helpers
+// ---------------------------------------------------------------------------
+
+describe('cleanCodexCommand', () => {
+  it('extracts command from /bin/zsh,-lc,<cmd> format', () => {
+    expect(cleanCodexCommand('/bin/zsh,-lc,pnpm test -- --run foo.test.ts'))
+      .toBe('pnpm test -- --run foo.test.ts');
+  });
+
+  it('extracts command from /bin/bash,-lc,<cmd> format', () => {
+    expect(cleanCodexCommand('/bin/bash,-lc,npm run build'))
+      .toBe('npm run build');
+  });
+
+  it('handles -c flag without -l', () => {
+    expect(cleanCodexCommand('/bin/zsh,-c,ls -la'))
+      .toBe('ls -la');
+  });
+
+  it('returns raw string when no shell prefix matches', () => {
+    expect(cleanCodexCommand('git status')).toBe('git status');
+  });
+
+  it('handles multiline commands', () => {
+    const raw = '/bin/zsh,-lc,echo "line1"\necho "line2"';
+    expect(cleanCodexCommand(raw)).toBe('echo "line1"\necho "line2"');
+  });
+});
+
+describe('isDiffContent', () => {
+  it('detects diff --git prefix', () => {
+    expect(isDiffContent('diff --git a/foo.ts b/foo.ts\n--- a/foo.ts')).toBe(true);
+  });
+
+  it('detects --- a/ and +++ b/ patterns', () => {
+    expect(isDiffContent('some header\n--- a/file.ts\n+++ b/file.ts\n@@ -1,3 +1,3 @@')).toBe(true);
+  });
+
+  it('returns false for normal text', () => {
+    expect(isDiffContent('Hello world')).toBe(false);
+  });
+
+  it('returns false for text mentioning diff without markers', () => {
+    expect(isDiffContent('The diff looks good')).toBe(false);
+  });
+});
+
+describe('formatMessage (Codex-specific)', () => {
+  it('cleans CodexBash tool_use commands', () => {
+    const msg: SessionMessage = {
+      type: 'tool_use',
+      content: '/bin/zsh,-lc,pnpm test',
+      timestamp: Date.now(),
+      metadata: { tool: 'CodexBash' },
+    };
+    const result = formatMessage(msg);
+    expect(result).toContain('pnpm test');
+    expect(result).not.toContain('/bin/zsh');
+  });
+
+  it('skips diff content in tool_result', () => {
+    const msg: SessionMessage = {
+      type: 'tool_result',
+      content: 'diff --git a/foo b/foo',
+      timestamp: Date.now(),
+      metadata: { tool: 'CodexBash' },
+    };
+    expect(formatMessage(msg)).toBe('');
+  });
+
+  it('skips CodexPatch generic confirmations', () => {
+    const msg: SessionMessage = {
+      type: 'tool_result',
+      content: 'Patch applied successfully',
+      timestamp: Date.now(),
+      metadata: { tool: 'CodexPatch' },
+    };
+    expect(formatMessage(msg)).toBe('');
+  });
+
+  it('skips diff content leaked as text type', () => {
+    const msg: SessionMessage = {
+      type: 'text',
+      content: 'diff --git a/src/main.ts b/src/main.ts\n--- a/src/main.ts\n+++ b/src/main.ts',
+      timestamp: Date.now(),
+    };
+    expect(formatMessage(msg)).toBe('');
+  });
+
+  it('skips thinking messages', () => {
+    const msg: SessionMessage = {
+      type: 'thinking',
+      content: 'Let me think about this...',
+      timestamp: Date.now(),
+    };
+    expect(formatMessage(msg)).toBe('');
+  });
+
+  it('skips silent tools (TodoWrite, Task, etc.)', () => {
+    for (const tool of ['TodoWrite', 'TaskCreate', 'TaskUpdate', 'EnterPlanMode']) {
+      const msg: SessionMessage = {
+        type: 'tool_use',
+        content: 'some content',
+        timestamp: Date.now(),
+        metadata: { tool },
+      };
+      expect(formatMessage(msg)).toBe('');
+    }
+  });
+
+  it('truncates long tool_use content to 120 chars', () => {
+    const msg: SessionMessage = {
+      type: 'tool_use',
+      content: 'A'.repeat(200),
+      timestamp: Date.now(),
+      metadata: { tool: 'Bash' },
+    };
+    const result = formatMessage(msg);
+    expect(result).toContain('...');
+    // 117 chars + "..." = 120
+    expect(result).not.toContain('A'.repeat(200));
+  });
+
+  it('shows short tool_result content', () => {
+    const msg: SessionMessage = {
+      type: 'tool_result',
+      content: 'OK',
+      timestamp: Date.now(),
+      metadata: { tool: 'Bash' },
+    };
+    const result = formatMessage(msg);
+    expect(result).toContain('OK');
+  });
+
+  it('skips long tool_result content (>200 chars)', () => {
+    const msg: SessionMessage = {
+      type: 'tool_result',
+      content: 'X'.repeat(201),
+      timestamp: Date.now(),
+      metadata: { tool: 'Bash' },
+    };
+    expect(formatMessage(msg)).toBe('');
   });
 });

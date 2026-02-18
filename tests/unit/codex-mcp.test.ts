@@ -501,12 +501,12 @@ describe('CodexMCPSession', () => {
       expect(messages[0].content).toBe('Hello world');
     });
 
-    it('agent_reasoning -> thinking message', () => {
+    it('agent_reasoning is skipped (not buffered)', () => {
       emitCodexEvent({ type: 'agent_reasoning', text: 'Let me think...' });
 
-      expect(messages).toHaveLength(1);
-      expect(messages[0].type).toBe('thinking');
-      expect(messages[0].content).toBe('Let me think...');
+      // agent_reasoning is no longer buffered — it was always filtered by
+      // the TG formatter anyway, and buffering triggered wasted flush cycles.
+      expect(messages).toHaveLength(0);
     });
 
     it('agent_reasoning_delta is skipped', () => {
@@ -617,15 +617,15 @@ describe('CodexMCPSession', () => {
       expect(messages[0].content).toBe('Conflict in file');
     });
 
-    it('turn_diff -> text message with unified diff', () => {
+    it('turn_diff is skipped (redundant with exec_command_end)', () => {
       emitCodexEvent({
         type: 'turn_diff',
         unified_diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
       });
 
-      expect(messages).toHaveLength(1);
-      expect(messages[0].type).toBe('text');
-      expect(messages[0].content).toContain('--- a/file.ts');
+      // turn_diff is no longer buffered — its content duplicates what
+      // exec_command_end / patch_apply_end already delivered as tool_result.
+      expect(messages).toHaveLength(0);
     });
 
     it('turn_diff with empty diff is skipped', () => {

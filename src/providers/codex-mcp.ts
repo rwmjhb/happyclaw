@@ -312,6 +312,9 @@ export class CodexMCPSession implements ProviderSession {
   private eventHandlers: EventHandler[] = [];
   private messageHandlers: MessageHandler[] = [];
 
+  /** Count of messages emitted during the current tool call (for dedup). */
+  private turnMessageCount = 0;
+
   // Config (stored for startSession)
   private spawnOptions: SpawnOptions;
   private readyPromise: Promise<void>;
@@ -535,6 +538,8 @@ export class CodexMCPSession implements ProviderSession {
       config.config = { mcp_servers: this.spawnOptions.mcpServers };
     }
 
+    this.turnMessageCount = 0;
+
     const response = await this.client.callTool(
       { name: 'codex', arguments: config as unknown as Record<string, unknown> },
       undefined,
@@ -546,8 +551,6 @@ export class CodexMCPSession implements ProviderSession {
 
     this.sessionStarted = true;
     this.extractIdentifiers(response);
-
-    // Tool response text = turn completion summary
     this.processToolResponse(response);
   }
 
@@ -558,6 +561,8 @@ export class CodexMCPSession implements ProviderSession {
 
     const sessionId = this.codexSessionId;
     const conversationId = this.conversationId ?? sessionId;
+
+    this.turnMessageCount = 0;
 
     const response = await this.client.callTool(
       {
@@ -609,8 +614,11 @@ export class CodexMCPSession implements ProviderSession {
       return;
     }
 
-    // The tool response text is typically a completion summary.
-    // Most content arrives via events, so only emit if there's text.
+    // Skip the tool response text when events already delivered content
+    // during this turn. The response typically duplicates the last
+    // agent_message that was already emitted via the event stream.
+    if (this.turnMessageCount > 0) return;
+
     const content = this.extractContentFromResponse(resp);
     if (content) {
       this.bufferAndEmit({
@@ -667,17 +675,12 @@ export class CodexMCPSession implements ProviderSession {
         break;
 
       case 'agent_reasoning':
-        this.bufferAndEmit({
-          type: 'thinking',
-          content: String(msg.text ?? ''),
-          timestamp: Date.now(),
-        });
-        break;
-
       case 'agent_reasoning_delta':
       case 'agent_reasoning_section_break':
       case 'token_count':
-        // Skip — streaming deltas and token counts are not buffered
+        // Skip — thinking/reasoning and token counts are noise for TG push.
+        // Buffering agent_reasoning as 'thinking' triggers empty flushes
+        // because the formatter filters it anyway.
         break;
 
       case 'exec_command_begin':
@@ -745,13 +748,10 @@ export class CodexMCPSession implements ProviderSession {
       }
 
       case 'turn_diff':
-        if (typeof msg.unified_diff === 'string' && msg.unified_diff) {
-          this.bufferAndEmit({
-            type: 'text',
-            content: msg.unified_diff,
-            timestamp: Date.now(),
-          });
-        }
+        // Skip — turn_diff contains the accumulated unified diff for the
+        // entire turn, which duplicates what exec_command_end / patch_apply_end
+        // already delivered as tool_result. Emitting it as 'text' would bypass
+        // the formatter's tool_result filters and flood TG with raw diffs.
         break;
 
       case 'task_started':
@@ -944,6 +944,7 @@ export class CodexMCPSession implements ProviderSession {
   // --- Private: buffer & emit helpers --------------------------------------
 
   private bufferAndEmit(msg: SessionMessage): void {
+    this.turnMessageCount++;
     this.messageBuffer.push(msg);
     for (const handler of this.messageHandlers) {
       handler(msg);

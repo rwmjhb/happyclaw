@@ -17,6 +17,42 @@ const SILENT_TOOLS = new Set([
   'TaskGet', 'EnterPlanMode', 'ExitPlanMode', 'Skill',
 ]);
 
+// ---------------------------------------------------------------------------
+// Codex command cleaning
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract the actual command from Codex's raw shell invocation format.
+ * e.g. "/bin/zsh,-lc,pnpm test -- --run foo.test.ts" → "pnpm test -- --run foo.test.ts"
+ * e.g. "/bin/bash,-lc,npm run build" → "npm run build"
+ */
+function cleanCodexCommand(raw: string): string {
+  // Pattern: /bin/zsh,-lc,<actual command> or /bin/bash,-lc,<actual command>
+  const match = raw.match(/^\/bin\/(?:z|ba)sh,-lc,(.+)$/s);
+  if (match) return match[1];
+
+  // Array-style: ["/bin/zsh", "-lc", "actual command"]
+  // Sometimes the content is already the command array joined by comma
+  const arrayMatch = raw.match(/^\/bin\/(?:z|ba)sh,-l?c?,(.+)$/s);
+  if (arrayMatch) return arrayMatch[1];
+
+  return raw;
+}
+
+// ---------------------------------------------------------------------------
+// Diff detection
+// ---------------------------------------------------------------------------
+
+/** Check if text content looks like a unified diff (safety net). */
+function isDiffContent(content: string): boolean {
+  return content.startsWith('diff --git ') ||
+    (content.includes('--- a/') && content.includes('+++ b/'));
+}
+
+// ---------------------------------------------------------------------------
+// Message formatting
+// ---------------------------------------------------------------------------
+
 /** Format a single message to Telegram markdown. Returns '' to skip. */
 function formatMessage(msg: SessionMessage): string {
   switch (msg.type) {
@@ -26,15 +62,24 @@ function formatMessage(msg: SessionMessage): string {
       const tool = msg.metadata?.tool ?? 'unknown';
       // Silent tools: skip entirely
       if (SILENT_TOOLS.has(tool)) return '';
-      // Other tools: show tool name only, truncate content to avoid JSON spam
-      const preview = msg.content.length > 120
-        ? msg.content.slice(0, 117) + '...'
+      // Codex commands: clean up raw shell invocation format
+      const content = tool === 'CodexBash'
+        ? cleanCodexCommand(msg.content)
         : msg.content;
+      // Truncate to avoid spam
+      const preview = content.length > 120
+        ? content.slice(0, 117) + '...'
+        : content;
       return `*Tool:* \`${tool}\`\n${preview}\n`;
     }
     case 'tool_result': {
-      // Skip long results (likely raw JSON output), show short ones
+      const tool = msg.metadata?.tool;
+      // Skip long results (likely raw JSON/diff output), show short ones
       if (msg.content.length > 200) return '';
+      // Skip diff content in short results too
+      if (isDiffContent(msg.content)) return '';
+      // CodexBash/CodexPatch: skip generic confirmations that add no value
+      if (tool === 'CodexPatch' && /^Patch applied\b/.test(msg.content)) return '';
       return `*Result:* ${msg.content}\n`;
     }
     case 'thinking':
@@ -45,6 +90,8 @@ function formatMessage(msg: SessionMessage): string {
       return `*Done:* ${msg.content}\n`;
     case 'text':
     default:
+      // Safety net: skip diff content that leaked through as 'text'
+      if (isDiffContent(msg.content)) return '';
       return msg.content + '\n';
   }
 }
@@ -98,3 +145,6 @@ export function formatForTelegram(messages: SessionMessage[]): string[] {
 
   return chunks;
 }
+
+// Export for testing
+export { cleanCodexCommand, isDiffContent, formatMessage };
