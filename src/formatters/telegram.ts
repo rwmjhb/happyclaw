@@ -40,15 +40,44 @@ function cleanCodexCommand(raw: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Codex read-only command detection
+// Codex action command detection (whitelist approach)
 // ---------------------------------------------------------------------------
 
-/** Commands that are just file reads — equivalent to Claude's Read tool. */
-const READ_ONLY_CMD_RE = /^\s*(?:cat|head|tail|less|wc|file|stat|ls|find)\s/;
+/**
+ * Whitelist of commands that represent meaningful *actions* worth surfacing.
+ * Everything else (cat, grep, sed, awk, jq, echo, …) is treated as
+ * read/exploration and silently filtered.
+ *
+ * Safe failure mode: if we miss an action command, the agent_message text
+ * already describes what Codex is doing, so the user won't lose context.
+ */
+const ACTION_COMMAND_PATTERNS: RegExp[] = [
+  // Package managers — run/test/build/install/add/remove/publish
+  /^\s*(?:npm|pnpm|yarn|bun)\s/,
+  /^\s*(?:npx|pnpx|bunx)\s/,
+  // Git (all subcommands are meaningful)
+  /^\s*git\s/,
+  // Build tools
+  /^\s*(?:make|cmake|cargo|go)\s/,
+  // JS/TS toolchain
+  /^\s*(?:tsc|tsx|esbuild|webpack|vite|rollup|turbo|nx)\b/,
+  // Test runners
+  /^\s*(?:vitest|jest|mocha|pytest)\b/,
+  // Containers / infra
+  /^\s*(?:docker|podman|kubectl|helm|terraform)\s/,
+  // Python/pip/uv package managers
+  /^\s*(?:pip|uv|poetry)\s+(?:install|add|run|build|publish|remove|update)\b/,
+  // Network tools
+  /^\s*(?:curl|wget|ssh|scp|rsync)\s/,
+  // File mutations
+  /^\s*(?:mkdir|rm|mv|cp|ln|chmod|chown|touch)\s/,
+  // Script execution (python/node/deno with a file argument, not -c one-liners)
+  /^\s*(?:python3?|node|deno)\s+(?!-[ce]\b)\S+/,
+];
 
-/** Check if a (cleaned) Codex command is a pure read-only / exploration command. */
-function isReadOnlyCommand(cleaned: string): boolean {
-  return READ_ONLY_CMD_RE.test(cleaned);
+/** Check if a (cleaned) Codex command is a meaningful action (not just reading). */
+function isActionCommand(cleaned: string): boolean {
+  return ACTION_COMMAND_PATTERNS.some(re => re.test(cleaned));
 }
 
 // ---------------------------------------------------------------------------
@@ -78,8 +107,8 @@ function formatMessage(msg: SessionMessage): string {
       const content = tool === 'CodexBash'
         ? cleanCodexCommand(msg.content)
         : msg.content;
-      // Codex read-only commands (cat, head, ls, …) are just file reads — skip
-      if (tool === 'CodexBash' && isReadOnlyCommand(content)) return '';
+      // Codex non-action commands (cat, grep, sed, …) are just reads — skip
+      if (tool === 'CodexBash' && !isActionCommand(content)) return '';
       // Truncate to avoid spam
       const preview = content.length > 120
         ? content.slice(0, 117) + '...'
@@ -162,4 +191,4 @@ export function formatForTelegram(messages: SessionMessage[]): string[] {
 }
 
 // Export for testing
-export { cleanCodexCommand, isDiffContent, isReadOnlyCommand, formatMessage };
+export { cleanCodexCommand, isDiffContent, isActionCommand, formatMessage };

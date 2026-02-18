@@ -9,7 +9,7 @@ import {
 import {
   cleanCodexCommand,
   isDiffContent,
-  isReadOnlyCommand,
+  isActionCommand,
   formatMessage,
 } from '../../src/formatters/telegram.js';
 
@@ -457,34 +457,98 @@ describe('isDiffContent', () => {
   });
 });
 
-describe('isReadOnlyCommand', () => {
-  it('detects cat commands', () => {
-    expect(isReadOnlyCommand('cat /Users/pope/.codex/skills/SKILL.md')).toBe(true);
-    expect(isReadOnlyCommand('cat package.json')).toBe(true);
+describe('isActionCommand', () => {
+  it('recognizes package manager commands as actions', () => {
+    expect(isActionCommand('pnpm test')).toBe(true);
+    expect(isActionCommand('npm run build')).toBe(true);
+    expect(isActionCommand('yarn install')).toBe(true);
+    expect(isActionCommand('bun run dev')).toBe(true);
+    expect(isActionCommand('npx create-react-app my-app')).toBe(true);
+    expect(isActionCommand('pnpx tsx src/main.ts')).toBe(true);
+    expect(isActionCommand('bunx vitest')).toBe(true);
   });
 
-  it('detects head/tail/less/ls/find/stat/wc/file commands', () => {
-    expect(isReadOnlyCommand('head -20 src/main.ts')).toBe(true);
-    expect(isReadOnlyCommand('tail -f log.txt')).toBe(true);
-    expect(isReadOnlyCommand('less README.md')).toBe(true);
-    expect(isReadOnlyCommand('ls -la src/')).toBe(true);
-    expect(isReadOnlyCommand('find . -name "*.ts"')).toBe(true);
-    expect(isReadOnlyCommand('stat package.json')).toBe(true);
-    expect(isReadOnlyCommand('wc -l src/main.ts')).toBe(true);
-    expect(isReadOnlyCommand('file dist/index.js')).toBe(true);
+  it('recognizes git commands as actions', () => {
+    expect(isActionCommand('git status')).toBe(true);
+    expect(isActionCommand('git push origin main')).toBe(true);
+    expect(isActionCommand('git commit -m "fix"')).toBe(true);
   });
 
-  it('does not match write/execute commands', () => {
-    expect(isReadOnlyCommand('pnpm test')).toBe(false);
-    expect(isReadOnlyCommand('npm run build')).toBe(false);
-    expect(isReadOnlyCommand('git status')).toBe(false);
-    expect(isReadOnlyCommand('echo hello')).toBe(false);
-    expect(isReadOnlyCommand('rm -rf node_modules')).toBe(false);
+  it('recognizes build/toolchain commands as actions', () => {
+    expect(isActionCommand('make build')).toBe(true);
+    expect(isActionCommand('cargo test')).toBe(true);
+    expect(isActionCommand('go build ./...')).toBe(true);
+    expect(isActionCommand('tsc --noEmit')).toBe(true);
+    expect(isActionCommand('esbuild src/main.ts')).toBe(true);
+    expect(isActionCommand('vite build')).toBe(true);
+    expect(isActionCommand('turbo run build')).toBe(true);
   });
 
-  it('does not match commands containing read-only as substring', () => {
-    expect(isReadOnlyCommand('concat files.txt')).toBe(false);
-    expect(isReadOnlyCommand('catalog items')).toBe(false);
+  it('recognizes test runners as actions', () => {
+    expect(isActionCommand('vitest run')).toBe(true);
+    expect(isActionCommand('jest --watch')).toBe(true);
+    expect(isActionCommand('pytest -v tests/')).toBe(true);
+  });
+
+  it('recognizes container/infra commands as actions', () => {
+    expect(isActionCommand('docker build -t myapp .')).toBe(true);
+    expect(isActionCommand('kubectl apply -f deploy.yaml')).toBe(true);
+    expect(isActionCommand('terraform plan')).toBe(true);
+  });
+
+  it('recognizes Python/pip package manager actions', () => {
+    expect(isActionCommand('pip install requests')).toBe(true);
+    expect(isActionCommand('uv run pytest')).toBe(true);
+    expect(isActionCommand('poetry add flask')).toBe(true);
+  });
+
+  it('recognizes network tool commands as actions', () => {
+    expect(isActionCommand('curl -X POST https://api.example.com')).toBe(true);
+    expect(isActionCommand('wget https://example.com/file.tar.gz')).toBe(true);
+    expect(isActionCommand('ssh user@host')).toBe(true);
+    expect(isActionCommand('rsync -avz src/ dest/')).toBe(true);
+  });
+
+  it('recognizes file mutation commands as actions', () => {
+    expect(isActionCommand('mkdir -p src/new-dir')).toBe(true);
+    expect(isActionCommand('rm -rf node_modules')).toBe(true);
+    expect(isActionCommand('mv old.ts new.ts')).toBe(true);
+    expect(isActionCommand('cp template.ts copy.ts')).toBe(true);
+    expect(isActionCommand('chmod +x script.sh')).toBe(true);
+    expect(isActionCommand('touch newfile.ts')).toBe(true);
+  });
+
+  it('recognizes script execution as actions', () => {
+    expect(isActionCommand('python script.py')).toBe(true);
+    expect(isActionCommand('python3 manage.py migrate')).toBe(true);
+    expect(isActionCommand('node server.js')).toBe(true);
+    expect(isActionCommand('deno run app.ts')).toBe(true);
+  });
+
+  it('does NOT treat python -c one-liners as actions', () => {
+    expect(isActionCommand('python -c "print(1)"')).toBe(false);
+    expect(isActionCommand('python3 -c "import sys; print(sys.version)"')).toBe(false);
+    expect(isActionCommand('node -e "console.log(1)"')).toBe(false);
+  });
+
+  it('does NOT treat read/exploration commands as actions', () => {
+    expect(isActionCommand('cat package.json')).toBe(false);
+    expect(isActionCommand('head -20 src/main.ts')).toBe(false);
+    expect(isActionCommand('tail -f log.txt')).toBe(false);
+    expect(isActionCommand('less README.md')).toBe(false);
+    expect(isActionCommand('ls -la src/')).toBe(false);
+    expect(isActionCommand('find . -name "*.ts"')).toBe(false);
+    expect(isActionCommand('stat package.json')).toBe(false);
+    expect(isActionCommand('wc -l src/main.ts')).toBe(false);
+  });
+
+  it('does NOT treat text processing/inspection commands as actions', () => {
+    expect(isActionCommand('sed -n "1,320p" src/main.ts')).toBe(false);
+    expect(isActionCommand('grep -r "TODO" src/')).toBe(false);
+    expect(isActionCommand('awk "{print $1}" data.txt')).toBe(false);
+    expect(isActionCommand('sort names.txt')).toBe(false);
+    expect(isActionCommand('jq ".dependencies" package.json')).toBe(false);
+    expect(isActionCommand('echo hello')).toBe(false);
   });
 });
 
@@ -501,14 +565,28 @@ describe('formatMessage (Codex-specific)', () => {
     expect(result).not.toContain('/bin/zsh');
   });
 
-  it('skips CodexBash read-only commands (cat, ls, etc.)', () => {
-    const msg: SessionMessage = {
-      type: 'tool_use',
-      content: '/bin/zsh,-lc,cat /Users/pope/.codex/superpowers/skills/SKILL.md',
-      timestamp: Date.now(),
-      metadata: { tool: 'CodexBash' },
-    };
-    expect(formatMessage(msg)).toBe('');
+  it('skips CodexBash non-action commands (cat, grep, sed, etc.)', () => {
+    for (const cmd of ['cat package.json', 'grep -r TODO src/', 'sed -n "1,320p" file.ts']) {
+      const msg: SessionMessage = {
+        type: 'tool_use',
+        content: `/bin/zsh,-lc,${cmd}`,
+        timestamp: Date.now(),
+        metadata: { tool: 'CodexBash' },
+      };
+      expect(formatMessage(msg)).toBe('');
+    }
+  });
+
+  it('shows CodexBash action commands (git, pnpm, docker, etc.)', () => {
+    for (const cmd of ['git push', 'pnpm test', 'docker build .']) {
+      const msg: SessionMessage = {
+        type: 'tool_use',
+        content: `/bin/zsh,-lc,${cmd}`,
+        timestamp: Date.now(),
+        metadata: { tool: 'CodexBash' },
+      };
+      expect(formatMessage(msg)).not.toBe('');
+    }
   });
 
   it('skips CodexBash "Command completed" results', () => {
