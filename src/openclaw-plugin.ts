@@ -18,6 +18,7 @@ import { HealthChecker } from './health.js';
 import { TelegramPushAdapter } from './push/telegram-push-adapter.js';
 import { summarizeSession, formatSummaryText } from './summary.js';
 import { parseCommand } from './commands.js';
+import { registerSessionCommands } from './openclaw-commands.js';
 import type { CallerContext, SessionMessage } from './types/index.js';
 
 // ---------------------------------------------------------------------------
@@ -36,6 +37,21 @@ interface OpenClawPluginApi {
   registerTool: (
     tool: unknown,
     opts?: { optional?: boolean; name?: string },
+  ) => void;
+  registerCommand: (
+    command: {
+      name: string;
+      description: string;
+      acceptsArgs?: boolean;
+      requireAuth?: boolean;
+      handler: (ctx: {
+        senderId?: string;
+        channel: string;
+        isAuthorizedSender: boolean;
+        args?: string;
+        commandBody: string;
+      }) => unknown;
+    },
   ) => void;
   on: (
     hookName: string,
@@ -148,6 +164,9 @@ const happyclawPlugin = {
         return createOpenClawTools(manager, auditLogger, caller, pushAdapter);
       },
     );
+
+    // --- Register slash commands (direct user control, zero token cost) ---
+    registerSessionCommands(api, manager, auditLogger, pushAdapter);
 
     // --- Block exec/process for Claude/Codex CLI (force session_* usage) ---
     // OpenClaw hook event shape: { toolName: string, params: Record<string, unknown> }

@@ -25,9 +25,11 @@ function createMockApi(
   overrides: Partial<OpenClawPluginApi> = {},
 ): OpenClawPluginApi & {
   registeredTools: unknown[];
+  registeredCommands: Map<string, unknown>;
   hookHandlers: Map<string, AnyHookHandler[]>;
 } {
   const registeredTools: unknown[] = [];
+  const registeredCommands = new Map<string, unknown>();
   const hookHandlers = new Map<string, AnyHookHandler[]>();
 
   return {
@@ -42,6 +44,9 @@ function createMockApi(
     registerTool: vi.fn((tool, _opts) => {
       registeredTools.push(tool);
     }),
+    registerCommand: vi.fn((command: { name: string }) => {
+      registeredCommands.set(command.name, command);
+    }),
     on: vi.fn((event: string, handler: AnyHookHandler) => {
       let handlers = hookHandlers.get(event);
       if (!handlers) {
@@ -51,6 +56,7 @@ function createMockApi(
       handlers.push(handler);
     }),
     registeredTools,
+    registeredCommands,
     hookHandlers,
     ...overrides,
   };
