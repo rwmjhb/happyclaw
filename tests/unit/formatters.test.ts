@@ -9,6 +9,7 @@ import {
 import {
   cleanCodexCommand,
   isDiffContent,
+  isReadOnlyCommand,
   formatMessage,
 } from '../../src/formatters/telegram.js';
 
@@ -456,6 +457,37 @@ describe('isDiffContent', () => {
   });
 });
 
+describe('isReadOnlyCommand', () => {
+  it('detects cat commands', () => {
+    expect(isReadOnlyCommand('cat /Users/pope/.codex/skills/SKILL.md')).toBe(true);
+    expect(isReadOnlyCommand('cat package.json')).toBe(true);
+  });
+
+  it('detects head/tail/less/ls/find/stat/wc/file commands', () => {
+    expect(isReadOnlyCommand('head -20 src/main.ts')).toBe(true);
+    expect(isReadOnlyCommand('tail -f log.txt')).toBe(true);
+    expect(isReadOnlyCommand('less README.md')).toBe(true);
+    expect(isReadOnlyCommand('ls -la src/')).toBe(true);
+    expect(isReadOnlyCommand('find . -name "*.ts"')).toBe(true);
+    expect(isReadOnlyCommand('stat package.json')).toBe(true);
+    expect(isReadOnlyCommand('wc -l src/main.ts')).toBe(true);
+    expect(isReadOnlyCommand('file dist/index.js')).toBe(true);
+  });
+
+  it('does not match write/execute commands', () => {
+    expect(isReadOnlyCommand('pnpm test')).toBe(false);
+    expect(isReadOnlyCommand('npm run build')).toBe(false);
+    expect(isReadOnlyCommand('git status')).toBe(false);
+    expect(isReadOnlyCommand('echo hello')).toBe(false);
+    expect(isReadOnlyCommand('rm -rf node_modules')).toBe(false);
+  });
+
+  it('does not match commands containing read-only as substring', () => {
+    expect(isReadOnlyCommand('concat files.txt')).toBe(false);
+    expect(isReadOnlyCommand('catalog items')).toBe(false);
+  });
+});
+
 describe('formatMessage (Codex-specific)', () => {
   it('cleans CodexBash tool_use commands', () => {
     const msg: SessionMessage = {
@@ -467,6 +499,26 @@ describe('formatMessage (Codex-specific)', () => {
     const result = formatMessage(msg);
     expect(result).toContain('pnpm test');
     expect(result).not.toContain('/bin/zsh');
+  });
+
+  it('skips CodexBash read-only commands (cat, ls, etc.)', () => {
+    const msg: SessionMessage = {
+      type: 'tool_use',
+      content: '/bin/zsh,-lc,cat /Users/pope/.codex/superpowers/skills/SKILL.md',
+      timestamp: Date.now(),
+      metadata: { tool: 'CodexBash' },
+    };
+    expect(formatMessage(msg)).toBe('');
+  });
+
+  it('skips CodexBash "Command completed" results', () => {
+    const msg: SessionMessage = {
+      type: 'tool_result',
+      content: 'Command completed',
+      timestamp: Date.now(),
+      metadata: { tool: 'CodexBash' },
+    };
+    expect(formatMessage(msg)).toBe('');
   });
 
   it('skips diff content in tool_result', () => {

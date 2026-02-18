@@ -40,6 +40,18 @@ function cleanCodexCommand(raw: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Codex read-only command detection
+// ---------------------------------------------------------------------------
+
+/** Commands that are just file reads — equivalent to Claude's Read tool. */
+const READ_ONLY_CMD_RE = /^\s*(?:cat|head|tail|less|wc|file|stat|ls|find)\s/;
+
+/** Check if a (cleaned) Codex command is a pure read-only / exploration command. */
+function isReadOnlyCommand(cleaned: string): boolean {
+  return READ_ONLY_CMD_RE.test(cleaned);
+}
+
+// ---------------------------------------------------------------------------
 // Diff detection
 // ---------------------------------------------------------------------------
 
@@ -66,6 +78,8 @@ function formatMessage(msg: SessionMessage): string {
       const content = tool === 'CodexBash'
         ? cleanCodexCommand(msg.content)
         : msg.content;
+      // Codex read-only commands (cat, head, ls, …) are just file reads — skip
+      if (tool === 'CodexBash' && isReadOnlyCommand(content)) return '';
       // Truncate to avoid spam
       const preview = content.length > 120
         ? content.slice(0, 117) + '...'
@@ -80,6 +94,7 @@ function formatMessage(msg: SessionMessage): string {
       if (isDiffContent(msg.content)) return '';
       // CodexBash/CodexPatch: skip generic confirmations that add no value
       if (tool === 'CodexPatch' && /^Patch applied\b/.test(msg.content)) return '';
+      if (tool === 'CodexBash' && /^Command completed\b/.test(msg.content)) return '';
       return `*Result:* ${msg.content}\n`;
     }
     case 'thinking':
@@ -147,4 +162,4 @@ export function formatForTelegram(messages: SessionMessage[]): string[] {
 }
 
 // Export for testing
-export { cleanCodexCommand, isDiffContent, formatMessage };
+export { cleanCodexCommand, isDiffContent, isReadOnlyCommand, formatMessage };
