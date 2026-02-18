@@ -77,16 +77,16 @@ describe('registerSessionCommands', () => {
     expect(registry.commands.size).toBe(10);
     const names = [...registry.commands.keys()].sort();
     expect(names).toEqual([
-      'sessions-approve',
-      'sessions-deny',
-      'sessions-list',
-      'sessions-read',
-      'sessions-resume',
-      'sessions-send',
-      'sessions-spawn',
-      'sessions-stop',
-      'sessions-summary',
-      'sessions-switch',
+      'sessions_approve',
+      'sessions_deny',
+      'sessions_list',
+      'sessions_read',
+      'sessions_resume',
+      'sessions_send',
+      'sessions_spawn',
+      'sessions_stop',
+      'sessions_summary',
+      'sessions_switch',
     ]);
   });
 
@@ -96,31 +96,31 @@ describe('registerSessionCommands', () => {
     }
   });
 
-  it('sessions-list has acceptsArgs: false', () => {
-    const cmd = registry.commands.get('sessions-list')!;
+  it('sessions_list has acceptsArgs: false', () => {
+    const cmd = registry.commands.get('sessions_list')!;
     expect(cmd.acceptsArgs).toBe(false);
   });
 
   it('all other commands have acceptsArgs: true', () => {
     for (const [name, cmd] of registry.commands) {
-      if (name !== 'sessions-list') {
+      if (name !== 'sessions_list') {
         expect(cmd.acceptsArgs).toBe(true);
       }
     }
   });
 
-  // ----- sessions-list -----
+  // ----- sessions_list -----
 
-  describe('/sessions-list', () => {
+  describe('/sessions_list', () => {
     it('returns empty message when no sessions', async () => {
-      const cmd = registry.commands.get('sessions-list')!;
+      const cmd = registry.commands.get('sessions_list')!;
       const result = (await cmd.handler(makeCtx())) as { text: string };
       expect(result.text).toContain('No active sessions');
     });
 
     it('lists sessions the user owns', async () => {
       await manager.spawn('claude', { cwd: '/tmp', mode: 'local' }, 'user-1');
-      const cmd = registry.commands.get('sessions-list')!;
+      const cmd = registry.commands.get('sessions_list')!;
       const result = (await cmd.handler(makeCtx())) as { text: string };
       expect(result.text).toContain('Active sessions (1)');
       expect(result.text).toContain('claude');
@@ -129,24 +129,24 @@ describe('registerSessionCommands', () => {
 
     it('does not list sessions owned by others', async () => {
       await manager.spawn('claude', { cwd: '/tmp', mode: 'local' }, 'other-user');
-      const cmd = registry.commands.get('sessions-list')!;
+      const cmd = registry.commands.get('sessions_list')!;
       const result = (await cmd.handler(makeCtx())) as { text: string };
       expect(result.text).toContain('No active sessions');
     });
   });
 
-  // ----- sessions-spawn -----
+  // ----- sessions_spawn -----
 
-  describe('/sessions-spawn', () => {
+  describe('/sessions_spawn', () => {
     it('returns usage on missing args', async () => {
-      const cmd = registry.commands.get('sessions-spawn')!;
+      const cmd = registry.commands.get('sessions_spawn')!;
       const result = (await cmd.handler(makeCtx('claude /tmp'))) as { text: string; isError?: boolean };
       expect(result.isError).toBe(true);
       expect(result.text).toContain('Usage');
     });
 
     it('spawns a session with correct params', async () => {
-      const cmd = registry.commands.get('sessions-spawn')!;
+      const cmd = registry.commands.get('sessions_spawn')!;
       const result = (await cmd.handler(makeCtx('claude /tmp fix the bug please'))) as { text: string };
       expect(result.text).toContain('Session started');
       expect(result.text).toContain('claude');
@@ -160,7 +160,7 @@ describe('registerSessionCommands', () => {
     });
 
     it('returns error on spawn failure', async () => {
-      const cmd = registry.commands.get('sessions-spawn')!;
+      const cmd = registry.commands.get('sessions_spawn')!;
       // Invalid provider should fail
       const result = (await cmd.handler(makeCtx('nonexistent /tmp do stuff'))) as { text: string; isError?: boolean };
       expect(result.isError).toBe(true);
@@ -168,11 +168,11 @@ describe('registerSessionCommands', () => {
     });
   });
 
-  // ----- sessions-send -----
+  // ----- sessions_send -----
 
-  describe('/sessions-send', () => {
+  describe('/sessions_send', () => {
     it('returns usage on missing args', async () => {
-      const cmd = registry.commands.get('sessions-send')!;
+      const cmd = registry.commands.get('sessions_send')!;
       const result = (await cmd.handler(makeCtx('sess-1'))) as { text: string; isError?: boolean };
       expect(result.isError).toBe(true);
       expect(result.text).toContain('Usage');
@@ -180,25 +180,25 @@ describe('registerSessionCommands', () => {
 
     it('sends input to a session', async () => {
       const session = await manager.spawn('claude', { cwd: '/tmp', mode: 'local' }, 'user-1');
-      const cmd = registry.commands.get('sessions-send')!;
+      const cmd = registry.commands.get('sessions_send')!;
       const result = (await cmd.handler(makeCtx(`${session.id} run npm test`))) as { text: string };
       expect(result.text).toContain(`Sent to ${session.id}`);
     });
 
     it('rejects access to sessions owned by others', async () => {
       const session = await manager.spawn('claude', { cwd: '/tmp', mode: 'local' }, 'other-user');
-      const cmd = registry.commands.get('sessions-send')!;
+      const cmd = registry.commands.get('sessions_send')!;
       const result = (await cmd.handler(makeCtx(`${session.id} hello`))) as { text: string; isError?: boolean };
       expect(result.isError).toBe(true);
       expect(result.text).toContain('Send failed');
     });
   });
 
-  // ----- sessions-read -----
+  // ----- sessions_read -----
 
-  describe('/sessions-read', () => {
+  describe('/sessions_read', () => {
     it('returns usage on missing args', async () => {
-      const cmd = registry.commands.get('sessions-read')!;
+      const cmd = registry.commands.get('sessions_read')!;
       const result = (await cmd.handler(makeCtx(''))) as { text: string; isError?: boolean };
       expect(result.isError).toBe(true);
       expect(result.text).toContain('Usage');
@@ -206,18 +206,18 @@ describe('registerSessionCommands', () => {
 
     it('reads messages from a session', async () => {
       const session = await manager.spawn('claude', { cwd: '/tmp', mode: 'local' }, 'user-1');
-      const cmd = registry.commands.get('sessions-read')!;
+      const cmd = registry.commands.get('sessions_read')!;
       const result = (await cmd.handler(makeCtx(session.id))) as { text: string };
       // No messages yet, should indicate empty
       expect(result.text).toContain('No recent output');
     });
   });
 
-  // ----- sessions-stop -----
+  // ----- sessions_stop -----
 
-  describe('/sessions-stop', () => {
+  describe('/sessions_stop', () => {
     it('returns usage on missing args', async () => {
-      const cmd = registry.commands.get('sessions-stop')!;
+      const cmd = registry.commands.get('sessions_stop')!;
       const result = (await cmd.handler(makeCtx(''))) as { text: string; isError?: boolean };
       expect(result.isError).toBe(true);
       expect(result.text).toContain('Usage');
@@ -225,7 +225,7 @@ describe('registerSessionCommands', () => {
 
     it('stops a session', async () => {
       const session = await manager.spawn('claude', { cwd: '/tmp', mode: 'local' }, 'user-1');
-      const cmd = registry.commands.get('sessions-stop')!;
+      const cmd = registry.commands.get('sessions_stop')!;
       const result = (await cmd.handler(makeCtx(session.id))) as { text: string };
       expect(result.text).toContain('stopped');
 
@@ -235,67 +235,67 @@ describe('registerSessionCommands', () => {
 
     it('supports --force flag', async () => {
       const session = await manager.spawn('claude', { cwd: '/tmp', mode: 'local' }, 'user-1');
-      const cmd = registry.commands.get('sessions-stop')!;
+      const cmd = registry.commands.get('sessions_stop')!;
       const result = (await cmd.handler(makeCtx(`${session.id} --force`))) as { text: string };
       expect(result.text).toContain('stopped');
       expect(result.text).toContain('forced');
     });
   });
 
-  // ----- sessions-approve / sessions-deny -----
+  // ----- sessions_approve / sessions_deny -----
 
-  describe('/sessions-approve', () => {
+  describe('/sessions_approve', () => {
     it('returns usage on missing args', async () => {
-      const cmd = registry.commands.get('sessions-approve')!;
+      const cmd = registry.commands.get('sessions_approve')!;
       const result = (await cmd.handler(makeCtx('sess-1'))) as { text: string; isError?: boolean };
       expect(result.isError).toBe(true);
       expect(result.text).toContain('Usage');
     });
   });
 
-  describe('/sessions-deny', () => {
+  describe('/sessions_deny', () => {
     it('returns usage on missing args', async () => {
-      const cmd = registry.commands.get('sessions-deny')!;
+      const cmd = registry.commands.get('sessions_deny')!;
       const result = (await cmd.handler(makeCtx(''))) as { text: string; isError?: boolean };
       expect(result.isError).toBe(true);
       expect(result.text).toContain('Usage');
     });
   });
 
-  // ----- sessions-switch -----
+  // ----- sessions_switch -----
 
-  describe('/sessions-switch', () => {
+  describe('/sessions_switch', () => {
     it('returns usage on invalid mode', async () => {
-      const cmd = registry.commands.get('sessions-switch')!;
+      const cmd = registry.commands.get('sessions_switch')!;
       const result = (await cmd.handler(makeCtx('sess-1 invalid'))) as { text: string; isError?: boolean };
       expect(result.isError).toBe(true);
       expect(result.text).toContain('Usage');
     });
 
     it('returns usage on missing args', async () => {
-      const cmd = registry.commands.get('sessions-switch')!;
+      const cmd = registry.commands.get('sessions_switch')!;
       const result = (await cmd.handler(makeCtx(''))) as { text: string; isError?: boolean };
       expect(result.isError).toBe(true);
       expect(result.text).toContain('Usage');
     });
   });
 
-  // ----- sessions-summary -----
+  // ----- sessions_summary -----
 
-  describe('/sessions-summary', () => {
+  describe('/sessions_summary', () => {
     it('returns usage on missing args', async () => {
-      const cmd = registry.commands.get('sessions-summary')!;
+      const cmd = registry.commands.get('sessions_summary')!;
       const result = (await cmd.handler(makeCtx(''))) as { text: string; isError?: boolean };
       expect(result.isError).toBe(true);
       expect(result.text).toContain('Usage');
     });
   });
 
-  // ----- sessions-resume -----
+  // ----- sessions_resume -----
 
-  describe('/sessions-resume', () => {
+  describe('/sessions_resume', () => {
     it('returns usage on missing args', async () => {
-      const cmd = registry.commands.get('sessions-resume')!;
+      const cmd = registry.commands.get('sessions_resume')!;
       const result = (await cmd.handler(makeCtx('sess-1'))) as { text: string; isError?: boolean };
       expect(result.isError).toBe(true);
       expect(result.text).toContain('Usage');

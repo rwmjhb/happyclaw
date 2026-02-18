@@ -1,7 +1,7 @@
 /**
  * HappyClaw — OpenClaw slash command registration.
  *
- * Registers `/sessions-*` commands that let users control sessions
+ * Registers `/sessions_*` commands that let users control sessions
  * directly from TG/Discord without consuming agent tokens.
  *
  * These supplement (not replace) the existing session_* tools.
@@ -107,9 +107,9 @@ export function registerSessionCommands(
       .catch(() => {});
   };
 
-  // /sessions-list
+  // /sessions_list
   api.registerCommand({
-    name: 'sessions-list',
+    name: 'sessions_list',
     description: 'List active AI CLI sessions',
     acceptsArgs: false,
     requireAuth: true,
@@ -122,7 +122,7 @@ export function registerSessionCommands(
       log(caller.userId, 'list', '*', { count: sessions.length });
 
       if (sessions.length === 0) {
-        return { text: 'No active sessions. Use /sessions-spawn to start one.' };
+        return { text: 'No active sessions. Use /sessions_spawn to start one.' };
       }
 
       const lines = sessions.map((s) => {
@@ -133,16 +133,16 @@ export function registerSessionCommands(
     },
   });
 
-  // /sessions-spawn <provider> <cwd> <task...>
+  // /sessions_spawn <provider> <cwd> <task...>
   api.registerCommand({
-    name: 'sessions-spawn',
+    name: 'sessions_spawn',
     description: 'Start a new AI CLI session',
     acceptsArgs: true,
     requireAuth: true,
     handler: async (ctx) => {
       const parts = splitArgs(ctx.args ?? '', 3);
       if (parts.length < 3) {
-        return usage('sessions-spawn', '<provider> <cwd> <task...>', 'Example: /sessions-spawn claude ~/project fix the login bug');
+        return usage('sessions_spawn', '<provider> <cwd> <task...>', 'Example: /sessions_spawn claude ~/project fix the login bug');
       }
 
       const [provider, cwd, task] = parts;
@@ -168,16 +168,16 @@ export function registerSessionCommands(
     },
   });
 
-  // /sessions-resume <id> <task...>
+  // /sessions_resume <id> <task...>
   api.registerCommand({
-    name: 'sessions-resume',
+    name: 'sessions_resume',
     description: 'Resume a stopped session',
     acceptsArgs: true,
     requireAuth: true,
     handler: async (ctx) => {
       const parts = splitArgs(ctx.args ?? '', 2);
       if (parts.length < 2) {
-        return usage('sessions-resume', '<sessionId> <task...>', 'Example: /sessions-resume abc123 continue working on auth');
+        return usage('sessions_resume', '<sessionId> <task...>', 'Example: /sessions_resume abc123 continue working on auth');
       }
 
       const [sessionId, task] = parts;
@@ -202,16 +202,16 @@ export function registerSessionCommands(
     },
   });
 
-  // /sessions-send <id> <text...>
+  // /sessions_send <id> <text...>
   api.registerCommand({
-    name: 'sessions-send',
+    name: 'sessions_send',
     description: 'Send input to a running session',
     acceptsArgs: true,
     requireAuth: true,
     handler: async (ctx) => {
       const parts = splitArgs(ctx.args ?? '', 2);
       if (parts.length < 2) {
-        return usage('sessions-send', '<sessionId> <text...>', 'Example: /sessions-send abc123 run npm test');
+        return usage('sessions_send', '<sessionId> <text...>', 'Example: /sessions_send abc123 run npm test');
       }
 
       const [sessionId, input] = parts;
@@ -236,16 +236,16 @@ export function registerSessionCommands(
     },
   });
 
-  // /sessions-read <id>
+  // /sessions_read <id>
   api.registerCommand({
-    name: 'sessions-read',
+    name: 'sessions_read',
     description: 'Read recent output from a session',
     acceptsArgs: true,
     requireAuth: true,
     handler: (ctx) => {
       const sessionId = (ctx.args ?? '').trim();
       if (!sessionId) {
-        return usage('sessions-read', '<sessionId>', 'Example: /sessions-read abc123');
+        return usage('sessions_read', '<sessionId>', 'Example: /sessions_read abc123');
       }
 
       const caller = callerFromCtx(ctx);
@@ -270,16 +270,16 @@ export function registerSessionCommands(
     },
   });
 
-  // /sessions-approve <id> <requestId>
+  // /sessions_approve <id> <requestId>
   api.registerCommand({
-    name: 'sessions-approve',
+    name: 'sessions_approve',
     description: 'Approve a permission request',
     acceptsArgs: true,
     requireAuth: true,
     handler: async (ctx) => {
       const parts = splitArgs(ctx.args ?? '', 2);
       if (parts.length < 2) {
-        return usage('sessions-approve', '<sessionId> <requestId>', 'Example: /sessions-approve abc123 tool_xyz');
+        return usage('sessions_approve', '<sessionId> <requestId>', 'Example: /sessions_approve abc123 tool_xyz');
       }
 
       const [sessionId, requestId] = parts;
@@ -297,16 +297,16 @@ export function registerSessionCommands(
     },
   });
 
-  // /sessions-deny <id> <requestId>
+  // /sessions_deny <id> <requestId>
   api.registerCommand({
-    name: 'sessions-deny',
+    name: 'sessions_deny',
     description: 'Deny a permission request',
     acceptsArgs: true,
     requireAuth: true,
     handler: async (ctx) => {
       const parts = splitArgs(ctx.args ?? '', 2);
       if (parts.length < 2) {
-        return usage('sessions-deny', '<sessionId> <requestId>', 'Example: /sessions-deny abc123 tool_xyz');
+        return usage('sessions_deny', '<sessionId> <requestId>', 'Example: /sessions_deny abc123 tool_xyz');
       }
 
       const [sessionId, requestId] = parts;
@@ -324,16 +324,16 @@ export function registerSessionCommands(
     },
   });
 
-  // /sessions-switch <id> <mode>
+  // /sessions_switch <id> <mode>
   api.registerCommand({
-    name: 'sessions-switch',
+    name: 'sessions_switch',
     description: 'Switch session mode (local/remote)',
     acceptsArgs: true,
     requireAuth: true,
     handler: async (ctx) => {
       const parts = splitArgs(ctx.args ?? '', 2);
       if (parts.length < 2 || !['local', 'remote'].includes(parts[1])) {
-        return usage('sessions-switch', '<sessionId> <local|remote>', 'Example: /sessions-switch abc123 local');
+        return usage('sessions_switch', '<sessionId> <local|remote>', 'Example: /sessions_switch abc123 local');
       }
 
       const [sessionId, mode] = parts;
@@ -350,16 +350,16 @@ export function registerSessionCommands(
     },
   });
 
-  // /sessions-stop <id> [--force]
+  // /sessions_stop <id> [--force]
   api.registerCommand({
-    name: 'sessions-stop',
+    name: 'sessions_stop',
     description: 'Stop a running session',
     acceptsArgs: true,
     requireAuth: true,
     handler: async (ctx) => {
       const argsStr = (ctx.args ?? '').trim();
       if (!argsStr) {
-        return usage('sessions-stop', '<sessionId> [--force]', 'Example: /sessions-stop abc123');
+        return usage('sessions_stop', '<sessionId> [--force]', 'Example: /sessions_stop abc123');
       }
 
       const parts = argsStr.split(/\s+/);
@@ -379,16 +379,16 @@ export function registerSessionCommands(
     },
   });
 
-  // /sessions-summary <id>
+  // /sessions_summary <id>
   api.registerCommand({
-    name: 'sessions-summary',
+    name: 'sessions_summary',
     description: 'Get session summary (messages, tools, files, duration)',
     acceptsArgs: true,
     requireAuth: true,
     handler: (ctx) => {
       const sessionId = (ctx.args ?? '').trim();
       if (!sessionId) {
-        return usage('sessions-summary', '<sessionId>', 'Example: /sessions-summary abc123');
+        return usage('sessions_summary', '<sessionId>', 'Example: /sessions_summary abc123');
       }
 
       const caller = callerFromCtx(ctx);
