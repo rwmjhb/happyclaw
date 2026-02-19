@@ -42,13 +42,23 @@ let mockCallToolFn: ReturnType<typeof vi.fn>;
 let mockClientCloseFn: ReturnType<typeof vi.fn>;
 let mockConnectFn: ReturnType<typeof vi.fn>;
 
+/** Set before creating CodexMCPSession to make connect() reject */
+let nextConnectError: Error | null = null;
+
 vi.mock('@modelcontextprotocol/sdk/client/index.js', () => {
   const MockClient = function (this: any) {
     mockCallToolFn = vi.fn().mockResolvedValue({
       content: [{ type: 'text', text: 'Done' }],
     });
     mockClientCloseFn = vi.fn().mockResolvedValue(undefined);
-    mockConnectFn = vi.fn().mockResolvedValue(undefined);
+    mockConnectFn = vi.fn().mockImplementation(() => {
+      if (nextConnectError) {
+        const err = nextConnectError;
+        nextConnectError = null;
+        return Promise.reject(err);
+      }
+      return Promise.resolve(undefined);
+    });
 
     this.connect = mockConnectFn;
     this.close = mockClientCloseFn;
@@ -64,10 +74,16 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => {
   return { Client: MockClient };
 });
 
+let mockTransportInstances: any[] = [];
+
 vi.mock('@modelcontextprotocol/sdk/client/stdio.js', () => {
   const MockTransport = function (this: any) {
     this.pid = 12345;
     this.stderr = new EventEmitter();
+    this.close = vi.fn().mockResolvedValue(undefined);
+    this.onclose = undefined;
+    this.onerror = undefined;
+    mockTransportInstances.push(this);
   } as any;
 
   return { StdioClientTransport: MockTransport };
@@ -269,8 +285,10 @@ describe('CodexMCPSession', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     mockChildren = [];
+    mockTransportInstances = [];
     mockNotificationHandler = null;
     mockRequestHandler = null;
+    nextConnectError = null;
     events = [];
     messages = [];
 
@@ -956,6 +974,333 @@ describe('CodexMCPSession', () => {
       });
 
       expect(messages[0].metadata?.sdkMessageId).toBe('camel-id');
+    });
+  });
+
+  // --- Multi-turn state machine ---
+
+  describe('multi-turn state machine', () => {
+    function emitCodexEvent(msg: Record<string, unknown>): void {
+      mockNotificationHandler?.({
+        method: 'codex/event',
+        params: { msg },
+      });
+    }
+
+    it('transitions connecting → idle after initialize', async () => {
+      // send() from connecting state waits for ready then succeeds
+      await session.send('first');
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Should have called codex tool
+      expect(mockCallToolFn).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'codex' }),
+        undefined,
+        expect.any(Object),
+      );
+    });
+
+    it('transitions idle → working → idle on tool call completion', async () => {
+      mockCallToolFn.mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'Done' }],
+        sessionId: 'sess-1',
+      });
+
+      await session.send('task 1');
+      await vi.advanceTimersByTimeAsync(0);
+
+      // After tool call completes, state should be idle
+      // Verify by sending again (would throw if still working)
+      await session.send('task 2');
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(mockCallToolFn).toHaveBeenCalledTimes(2);
+      expect(mockCallToolFn.mock.calls[1][0].name).toBe('codex-reply');
+    });
+
+    it('throws when sending while working', async () => {
+      // Make tool call hang (never resolves)
+      mockCallToolFn.mockReturnValueOnce(new Promise(() => {}));
+
+      await session.send('long task');
+      // Don't advance timers — tool call still pending
+
+      await expect(session.send('another')).rejects.toThrow(/still processing/);
+    });
+
+    it('task_complete sets taskCompleted flag, keeps session alive', async () => {
+      mockCallToolFn.mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'Done' }],
+        sessionId: 'sess-tc',
+      });
+
+      await session.send('do something');
+
+      // task_complete fires via notification before tool call returns
+      emitCodexEvent({ type: 'task_complete' });
+
+      const completeEvent = events.find((e) => e.type === 'task_complete');
+      expect(completeEvent).toBeDefined();
+
+      // Let tool call complete
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Session should still be usable (idle, not stopped)
+      await session.send('follow up');
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(mockCallToolFn).toHaveBeenCalledTimes(2);
+    });
+
+    it('initialPrompt sets working state correctly', async () => {
+      const s = new CodexMCPSession({
+        cwd: '/tmp',
+        mode: 'remote',
+        initialPrompt: 'auto start',
+      });
+
+      // Set up first call (from initialPrompt) to return sessionId
+      // Must be set BEFORE microtasks flush (connect resolves → initialize continues)
+      mockCallToolFn.mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'Started' }],
+        sessionId: 'sess-auto',
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(mockCallToolFn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'codex',
+          arguments: expect.objectContaining({ prompt: 'auto start' }),
+        }),
+        undefined,
+        expect.any(Object),
+      );
+
+      // After completion, session should be idle and accept more sends
+      s.onMessage(() => {});
+      await s.send('next task');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mockCallToolFn).toHaveBeenCalledTimes(2);
+      expect(mockCallToolFn.mock.calls[1][0].name).toBe('codex-reply');
+    });
+  });
+
+  // --- Transport close handling ---
+
+  describe('transport close handling', () => {
+    function emitCodexEvent(msg: Record<string, unknown>): void {
+      mockNotificationHandler?.({
+        method: 'codex/event',
+        params: { msg },
+      });
+    }
+
+    it('idle disconnect emits ready event (not error)', async () => {
+      mockCallToolFn.mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'Done' }],
+        sessionId: 'sess-idle-close',
+      });
+
+      await session.send('task');
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Session is now idle — trigger transport close
+      const transport = mockTransportInstances[0];
+      transport.onclose?.();
+
+      // Should emit 'ready' type (not 'error') for idle disconnect
+      const closeEvent = events.find(
+        (e) => e.summary.includes('disconnected (idle)'),
+      );
+      expect(closeEvent).toBeDefined();
+      expect(closeEvent!.type).toBe('ready');
+      expect(closeEvent!.severity).toBe('info');
+    });
+
+    it('taskCompleted disconnect emits ready event even if still working', async () => {
+      // Simulate: task_complete arrives, but tool call hasn't returned yet
+      mockCallToolFn.mockReturnValueOnce(
+        new Promise((resolve) => {
+          // Will resolve later
+          setTimeout(() => resolve({ content: [] }), 1000);
+        }),
+      );
+
+      await session.send('task');
+
+      // task_complete notification arrives
+      emitCodexEvent({ type: 'task_complete' });
+
+      // Transport closes while technically still 'working'
+      const transport = mockTransportInstances[0];
+      transport.onclose?.();
+
+      // With taskCompleted=true, should emit ready (not urgent error)
+      const closeEvent = events.find(
+        (e) => e.summary.includes('disconnected (idle)'),
+      );
+      expect(closeEvent).toBeDefined();
+      expect(closeEvent!.type).toBe('ready');
+    });
+
+    it('unexpected disconnect during working emits urgent error', async () => {
+      // Tool call hangs — state is 'working', no task_complete
+      mockCallToolFn.mockReturnValueOnce(new Promise(() => {}));
+      await session.send('task');
+
+      const transport = mockTransportInstances[0];
+      transport.onclose?.();
+
+      const errorEvent = events.find(
+        (e) => e.severity === 'urgent' && e.summary.includes('terminated unexpectedly'),
+      );
+      expect(errorEvent).toBeDefined();
+      expect(errorEvent!.type).toBe('error');
+    });
+
+    it('stopped session ignores transport close', async () => {
+      await session.stop();
+
+      const eventCountBefore = events.length;
+      const transport = mockTransportInstances[0];
+      transport.onclose?.();
+
+      // No new events should be emitted
+      expect(events.length).toBe(eventCountBefore);
+    });
+  });
+
+  // --- Reconnect ---
+
+  describe('reconnect', () => {
+    it('reconnects transparently when sending after disconnect', async () => {
+      mockCallToolFn.mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'First done' }],
+        sessionId: 'sess-reconnect',
+      });
+
+      await session.send('first task');
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Simulate idle disconnect
+      const transport = mockTransportInstances[0];
+      transport.onclose?.();
+
+      // Send again — should trigger reconnect (creates new Client + Transport)
+      // After reconnect, mockCallToolFn is the NEW Client's mock
+      await session.send('second task');
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Should have created a new transport (reconnect)
+      expect(mockTransportInstances.length).toBe(2);
+      // The new Client's callTool should have been called with codex-reply
+      expect(mockCallToolFn).toHaveBeenCalledTimes(1);
+      expect(mockCallToolFn.mock.calls[0][0].name).toBe('codex-reply');
+    });
+
+    it('cleans up old transport stderr listeners on reconnect', async () => {
+      mockCallToolFn.mockResolvedValueOnce({
+        content: [],
+        sessionId: 'sess-cleanup',
+      });
+
+      await session.send('task');
+      await vi.advanceTimersByTimeAsync(0);
+
+      const oldTransport = mockTransportInstances[0];
+      const removeAllSpy = vi.spyOn(oldTransport.stderr, 'removeAllListeners');
+
+      // Trigger disconnect + reconnect
+      oldTransport.onclose?.();
+      mockCallToolFn.mockResolvedValueOnce({ content: [] });
+      await session.send('reconnect task');
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(removeAllSpy).toHaveBeenCalled();
+      expect(oldTransport.close).toHaveBeenCalled();
+    });
+  });
+
+  // --- clearSession ---
+
+  describe('clearSession', () => {
+    it('resets session state when idle', async () => {
+      mockCallToolFn.mockResolvedValueOnce({
+        content: [],
+        sessionId: 'sess-clear',
+        conversationId: 'conv-clear',
+      });
+
+      await session.send('task');
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(session.realSessionId).toBe('sess-clear');
+
+      session.clearSession();
+
+      // Session IDs should be cleared
+      expect(session.realSessionId).toBeNull();
+
+      // Next send should use 'codex' (new session) not 'codex-reply'
+      await session.send('fresh start');
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(mockCallToolFn.mock.calls[1][0].name).toBe('codex');
+    });
+
+    it('throws when clearing during working state', async () => {
+      mockCallToolFn.mockReturnValueOnce(new Promise(() => {}));
+      await session.send('task');
+
+      expect(() => session.clearSession()).toThrow(/Cannot clear session/);
+    });
+
+    it('throws when clearing during connecting state', () => {
+      // Session is in 'connecting' state right after construction
+      // But initialize is async and may have already resolved...
+      // Create a session where connect hangs
+      mockConnectFn.mockReturnValueOnce(new Promise(() => {}));
+      const s = new CodexMCPSession({ cwd: '/tmp', mode: 'remote' });
+
+      expect(() => s.clearSession()).toThrow(/Cannot clear session/);
+    });
+
+    it('denies pending permissions on clear', async () => {
+      mockCallToolFn.mockResolvedValueOnce({ content: [] });
+      await session.send('task');
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Create a pending permission
+      const permPromise = mockRequestHandler?.({
+        params: {
+          codex_call_id: 'perm-clear',
+          codex_command: ['echo'],
+          codex_cwd: '/tmp',
+        },
+      });
+
+      session.clearSession();
+
+      const result = await permPromise;
+      expect(result).toEqual({ action: 'denied' });
+    });
+  });
+
+  // --- Initialize failure ---
+
+  describe('initialize failure', () => {
+    it('sets stopped state on connect failure', async () => {
+      nextConnectError = new Error('Connection refused');
+
+      const s = new CodexMCPSession({ cwd: '/tmp', mode: 'remote' });
+      s.onEvent((e) => events.push(e));
+
+      // waitForReady should reject
+      await expect(s.waitForReady()).rejects.toThrow(/Connection refused/);
+
+      // Session should be stopped
+      await expect(s.send('test')).rejects.toThrow(/stopped/);
     });
   });
 });

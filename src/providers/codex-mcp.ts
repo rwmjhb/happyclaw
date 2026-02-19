@@ -284,6 +284,8 @@ export class CodexMCPProvider implements SessionProvider {
 // CodexMCPSession — Official MCP SDK, two-tool pattern, Elicitation permissions
 // ---------------------------------------------------------------------------
 
+type CodexSessionState = 'connecting' | 'working' | 'idle' | 'stopped';
+
 export class CodexMCPSession implements ProviderSession {
   readonly provider = 'codex';
   readonly cwd: string;
@@ -293,11 +295,15 @@ export class CodexMCPSession implements ProviderSession {
   private client: Client;
   private transport: StdioClientTransport;
 
-  // Session state
+  // Session state machine
+  private sessionState: CodexSessionState = 'connecting';
   private sessionStarted = false;
   private codexSessionId: string | null = null;
   private conversationId: string | null = null;
   private stopped = false;
+  private connected = false;
+  private taskCompleted = false;
+  private reconnecting = false;
   private abortController = new AbortController();
   private readonly pendingId: string;
 
@@ -393,10 +399,25 @@ export class CodexMCPSession implements ProviderSession {
       throw new Error('Codex MCP session is stopped.');
     }
 
-    if (!this.sessionStarted) {
-      this.fireToolCall(() => this.startSession(input));
-    } else {
-      this.fireToolCall(() => this.continueSession(input));
+    switch (this.sessionState) {
+      case 'connecting':
+        await this.waitForReady();
+        if (this.stopped) throw new Error('Session stopped during connect.');
+        // fall through to idle — waitForReady resolves after initialize sets idle
+      // eslint-disable-next-line no-fallthrough
+      case 'idle':
+        this.sessionState = 'working';
+        this.turnMessageCount = 0;
+        this.taskCompleted = false;
+        this.fireToolCall(() => this.sessionStarted
+          ? this.continueSession(input)
+          : this.startSession(input),
+        );
+        break;
+      case 'working':
+        throw new Error('Codex is still processing. Wait for task_complete before sending.');
+      case 'stopped':
+        throw new Error('Codex MCP session is stopped.');
     }
   }
 
@@ -440,6 +461,7 @@ export class CodexMCPSession implements ProviderSession {
   async stop(force?: boolean): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
+    this.sessionState = 'stopped';
 
     // Abort any ongoing tool calls
     this.abortController.abort();
@@ -472,6 +494,26 @@ export class CodexMCPSession implements ProviderSession {
     }
   }
 
+  /** Reset session state without killing the MCP process. Only allowed when idle or stopped. */
+  clearSession(): void {
+    if (this.sessionState !== 'idle' && this.sessionState !== 'stopped') {
+      throw new Error('Cannot clear session while connecting or working.');
+    }
+
+    for (const [id, pending] of this.pendingPermissions) {
+      clearTimeout(pending.timer);
+      pending.resolve('denied');
+      this.pendingPermissions.delete(id);
+    }
+
+    this.codexSessionId = null;
+    this.conversationId = null;
+    this.sessionStarted = false;
+    this.taskCompleted = false;
+    this.sessionState = 'idle';
+    this.turnMessageCount = 0;
+  }
+
   onEvent(handler: EventHandler): void {
     this.eventHandlers.push(handler);
   }
@@ -485,7 +527,12 @@ export class CodexMCPSession implements ProviderSession {
   private async initialize(options: SpawnOptions): Promise<void> {
     try {
       await this.client.connect(this.transport);
+      this.connected = true;
     } catch (err) {
+      // Issue K: init failure → set stopped to prevent zombie connecting state
+      this.sessionState = 'stopped';
+      this.stopped = true;
+
       const msg = err instanceof Error ? err.message : String(err);
       this.emitEvent({
         type: 'error',
@@ -511,8 +558,14 @@ export class CodexMCPSession implements ProviderSession {
     });
 
     // If initial prompt provided, start the session immediately
+    // Issue L: must set working state via fireToolCall path
     if (options.initialPrompt) {
+      this.sessionState = 'working';
+      this.turnMessageCount = 0;
       this.fireToolCall(() => this.startSession(options.initialPrompt!));
+    } else {
+      // No initial prompt — session is idle, ready for send()
+      this.sessionState = 'idle';
     }
 
     this.readyResolve();
@@ -555,6 +608,11 @@ export class CodexMCPSession implements ProviderSession {
   }
 
   private async continueSession(prompt: string): Promise<void> {
+    // Reconnect transparently if MCP server disconnected (idle timeout)
+    if (!this.connected) {
+      await this.reconnect();
+    }
+
     if (!this.codexSessionId) {
       throw new Error('No active Codex session. Call startSession first.');
     }
@@ -584,20 +642,33 @@ export class CodexMCPSession implements ProviderSession {
    * Fire a tool call in the background. Tool calls block for the entire
    * turn while events stream via notifications, so we don't await them
    * in send(). Errors are emitted as events.
+   *
+   * This is the SINGLE place that transitions state to 'idle' after a
+   * tool call completes (Issue A fix — processToolResponse has early returns).
    */
   private fireToolCall(fn: () => Promise<void>): void {
-    fn().catch((err: unknown) => {
-      if (this.stopped) return; // expected after abort
-      const message = err instanceof Error ? err.message : String(err);
-      if (message.includes('abort')) return; // expected on stop
-      this.emitEvent({
-        type: 'error',
-        severity: 'warning',
-        summary: `Codex tool call error: ${message}`,
-        sessionId: this.id,
-        timestamp: Date.now(),
+    fn()
+      .then(() => {
+        if (this.sessionState === 'working') {
+          this.sessionState = 'idle';
+        }
+      })
+      .catch((err: unknown) => {
+        // Transition to idle even on error (unless stopped)
+        if (this.sessionState === 'working') {
+          this.sessionState = 'idle';
+        }
+        if (this.stopped) return; // expected after abort
+        const message = err instanceof Error ? err.message : String(err);
+        if (message.includes('abort')) return; // expected on stop
+        this.emitEvent({
+          type: 'error',
+          severity: 'warning',
+          summary: `Codex tool call error: ${message}`,
+          sessionId: this.id,
+          timestamp: Date.now(),
+        });
       });
-    });
   }
 
   private processToolResponse(response: unknown): void {
@@ -765,6 +836,7 @@ export class CodexMCPSession implements ProviderSession {
         break;
 
       case 'task_complete':
+        this.taskCompleted = true;  // Must set before emitEvent (Issue J)
         this.emitEvent({
           type: 'task_complete',
           severity: 'info',
@@ -865,15 +937,32 @@ export class CodexMCPSession implements ProviderSession {
     });
 
     // Transport close — fires when child process exits
+    // WARNING: summary text controls SessionManager cleanup — see handleProcessEvent()
     this.transport.onclose = () => {
       if (this.stopped) return; // expected after stop()
-      this.emitEvent({
-        type: 'error',
-        severity: 'urgent',
-        summary: 'Process exited: Codex MCP server terminated unexpectedly',
-        sessionId: this.id,
-        timestamp: Date.now(),
-      });
+      this.connected = false;  // All paths set this (Issue H)
+
+      if (this.sessionState === 'idle' || this.taskCompleted) {
+        // Idle/completed disconnect — MCP server idle timeout or normal task-end exit.
+        // Use type:'ready' (not 'error') so TG push adapter ignores it (Issue B).
+        // Summary must NOT contain "Process exited" to avoid SessionManager cleanup.
+        this.emitEvent({
+          type: 'ready',
+          severity: 'info',
+          summary: 'Codex MCP server disconnected (idle). Will reconnect on next send.',
+          sessionId: this.id,
+          timestamp: Date.now(),
+        });
+      } else {
+        // working/connecting without taskCompleted — truly unexpected death
+        this.emitEvent({
+          type: 'error',
+          severity: 'urgent',
+          summary: 'Process exited: Codex MCP server terminated unexpectedly',
+          sessionId: this.id,
+          timestamp: Date.now(),
+        });
+      }
     };
 
     // Transport error
@@ -887,6 +976,52 @@ export class CodexMCPSession implements ProviderSession {
         timestamp: Date.now(),
       });
     };
+  }
+
+  // --- Private: transparent reconnect ----------------------------------------
+
+  /**
+   * Reconnect to a fresh Codex MCP server process after idle disconnect.
+   * Fully tears down old transport (including stderr listeners) before
+   * creating a new one with the same config.
+   */
+  private async reconnect(): Promise<void> {
+    if (this.reconnecting) return;  // Prevent concurrent reconnects (Issue G)
+    this.reconnecting = true;
+
+    try {
+      // Tear down old transport handlers (Issue E — stderr listener)
+      this.transport.onclose = undefined;
+      this.transport.onerror = undefined;
+      this.transport.stderr?.removeAllListeners();
+      try { await this.transport.close(); } catch { /* old process may be dead */ }
+
+      // Close old client to prevent handler leaks
+      try { await this.client.close(); } catch { /* ignore */ }
+
+      // Build new transport with original config (Issue D — resolveCodexPath)
+      const subcommand = getCodexMcpSubcommand();
+      this.transport = new StdioClientTransport({
+        command: resolveCodexPath(),
+        args: [subcommand, ...(this.spawnOptions.args ?? [])],
+        env: buildTransportEnv(),
+        cwd: this.cwd,
+        stderr: 'pipe',
+      });
+
+      this.client = new Client(
+        { name: 'happyclaw-codex', version: '0.0.1' },
+        { capabilities: { elicitation: {} } },
+      );
+
+      this.registerEventHandler();
+      this.registerPermissionHandler();
+      this.registerTransportHandlers();
+      await this.client.connect(this.transport);
+      this.connected = true;
+    } finally {
+      this.reconnecting = false;
+    }
   }
 
   // --- Private: session ID extraction (defensive) --------------------------
