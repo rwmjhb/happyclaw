@@ -609,10 +609,20 @@ describe('formatMessage (Codex-specific)', () => {
     expect(formatMessage(msg)).toBe('');
   });
 
-  it('skips CodexPatch generic confirmations', () => {
+  it('skips all CodexPatch tool_result (agent_message covers it)', () => {
     const msg: SessionMessage = {
       type: 'tool_result',
-      content: 'Patch applied successfully',
+      content: 'Success. Updated the following files:\nA /path/to/file.dart',
+      timestamp: Date.now(),
+      metadata: { tool: 'CodexPatch' },
+    };
+    expect(formatMessage(msg)).toBe('');
+  });
+
+  it('skips CodexPatch tool_use (in SILENT_TOOLS)', () => {
+    const msg: SessionMessage = {
+      type: 'tool_use',
+      content: 'Modifying src/main.ts, src/utils.ts',
       timestamp: Date.now(),
       metadata: { tool: 'CodexPatch' },
     };

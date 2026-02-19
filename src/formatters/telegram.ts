@@ -15,6 +15,9 @@ const MAX_CHUNKS = 3;
 const SILENT_TOOLS = new Set([
   'TodoWrite', 'TodoRead', 'Task', 'TaskCreate', 'TaskUpdate', 'TaskList',
   'TaskGet', 'EnterPlanMode', 'ExitPlanMode', 'Skill',
+  // Codex file patches — agent_message already describes what's being changed;
+  // showing every individual patch is pure noise when Codex modifies 20+ files.
+  'CodexPatch',
 ]);
 
 // ---------------------------------------------------------------------------
@@ -121,8 +124,9 @@ function formatMessage(msg: SessionMessage): string {
       if (msg.content.length > 200) return '';
       // Skip diff content in short results too
       if (isDiffContent(msg.content)) return '';
-      // CodexBash/CodexPatch: skip generic confirmations that add no value
-      if (tool === 'CodexPatch' && /^Patch applied\b/.test(msg.content)) return '';
+      // CodexPatch: all results are noise (agent_message already covers it)
+      if (tool === 'CodexPatch') return '';
+      // CodexBash: skip generic confirmations that add no value
       if (tool === 'CodexBash' && /^Command completed\b/.test(msg.content)) return '';
       return `*Result:* ${msg.content}\n`;
     }
