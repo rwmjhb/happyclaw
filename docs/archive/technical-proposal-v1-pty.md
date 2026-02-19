@@ -1,4 +1,6 @@
-# HappyClaw 技术方案
+# HappyClaw 技术方案 v1 (PTY-based, superseded)
+
+> **ARCHIVED** — 本方案已被 v2（SDK-first 架构）取代。见 `docs/technical-proposal.md`。
 
 > OpenClaw PTY Bridge Plugin — 将本机 Claude Code / Codex / Gemini CLI session 桥接到 OpenClaw
 

@@ -1,5 +1,7 @@
 # Happy Coder 真实架构分析
 
+> **ARCHIVED** — 本文发现已纳入 v2 技术方案（SDK-first 架构）。见 `docs/technical-proposal.md`。
+
 > 基于 https://github.com/slopus/happy 源码的深入分析，发现其核心设计与 HappyClaw 技术方案的假设存在根本性差异。
 
 ## 核心发现：不是 PTY 桥接，而是 SDK 模式切换

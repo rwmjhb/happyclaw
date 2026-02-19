@@ -1,6 +1,16 @@
 # HappyClaw 技术方案 v2
 
 > OpenClaw Session Bridge Plugin — 将本机 Claude Code / Codex / Gemini CLI session 桥接到 OpenClaw
+>
+> **注意 (2026-02-19)**: 本方案作为设计文档已基本完成使命。以下内容与当前实现存在较大偏差：
+> - **目录结构** (Section 7): 完全不同 — 实际为扁平结构 `src/providers/codex-mcp.ts` 等，非嵌套目录
+> - **工具名称**: 实际用下划线 `session_list`，非点号 `session.list`；共 9 个工具（增加 `session_summary`）
+> - **Codex MCP** (Section 4.2): 已从 "Phase 3 TBD" 变为完整实现 — 状态机 `connecting→working→idle→stopped`、多轮交互、自动重连
+> - **settingSources**: 实际为 `['user', 'project', 'local']`，非文中的 `['project']`
+> - **TG Push**: 实际有 `TelegramPushAdapter` 零 token 推送模型，文中未涉及
+> - **测试**: 21 个文件 537 个测试（文中为 0）
+>
+> 评审记录 (Sections 10-12) 作为历史审计保留不变。详细 Codex 多轮设计见 `.claude/plans/piped-orbiting-cosmos.md`。
 
 ## 1. 背景与动机
 

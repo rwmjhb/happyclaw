@@ -1,5 +1,7 @@
 # HappyClaw Codex Provider — Gap Analysis Report
 
+> **ARCHIVED (2026-02-19)** — 本报告描述的是重写前的旧实现。所有 gap 已在 `src/providers/codex-mcp.ts` 重写中解决，多轮交互已验证通过。
+
 **Date**: 2026-02-17
 **Author**: codebase-researcher (codex-rewrite team)
 **Purpose**: Catalog the current HappyClaw Codex implementation, identify gaps vs. what Codex MCP actually supports (per Happy Coder's implementation), and map every file/function that needs to change.

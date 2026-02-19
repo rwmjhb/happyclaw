@@ -1,8 +1,13 @@
 # HappyClaw CLI 实现方案 — Mac ↔ Phone 会话交接
 
-> **状态**: 待实施 (Parked)
+> **状态**: 已搁置 (Parked)
 > **日期**: 2026-02-09
 > **前置**: 先用 OpenClaw 插件模式运行一段时间，积累使用经验后再实施
+>
+> **当前临时方案** (2026-02-19):
+> - Mac → TG: 本地 `/exit` 退出 → TG `session_spawn(continueSession: true)` 接续
+> - TG → Mac: TG `session_stop` → 本地 `claude --continue` 接续
+> - Codex 现已支持多轮交互（MCP `codex-reply`），但仍无跨进程 resume
 
 ## 目标
 
@@ -76,5 +81,5 @@ openclaw happyclaw stop <sessionId>
 
 ## 限制
 
-- Codex 不支持 resume — 交接仅适用于 Claude 会话
+- Codex 不支持跨进程 resume — 但已支持同进程多轮交互（`codex-reply`，2026-02-19 验证通过）
 - session_id 捕获有 API 成本 — 每次 spawn 多一次 SDK 往返

@@ -1,7 +1,7 @@
 # Codex Provider Rewrite — Design Document
 
 > Date: 2026-02-17
-> Status: Draft — pending Codex cross-model review
+> Status: **IMPLEMENTED (2026-02-19)** — 设计已实现并验证。实际状态机为 `connecting→working→idle→stopped`（非设计中的 `idle→starting→running→stopped`）。`agent_reasoning` 和 `turn_diff` 实际被跳过（非 buffer）。多轮交互已通过集成测试。
 > Based on: happy-coder-codex-analysis.md + happyclaw-codex-gap-analysis.md
 
 ---

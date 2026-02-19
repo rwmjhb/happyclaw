@@ -1,7 +1,7 @@
 # HappyClaw Slash Commands Design
 
 **Date**: 2026-02-18
-**Status**: Approved
+**Status**: Implemented
 
 ## Goal
 
@@ -9,20 +9,20 @@ Add OpenClaw slash commands as a supplement to existing tools, so users can dire
 
 ## Commands
 
-All use `sessions-` prefix to avoid conflicts with OpenClaw reserved names.
+All use `sessions_` prefix (underscore for Telegram `setMyCommands` compatibility).
 
 | Command | Args | Maps to |
 |---|---|---|
-| `/sessions-list` | (none) | session_list |
-| `/sessions-spawn` | `<provider> <cwd> <task...>` | session_spawn |
-| `/sessions-resume` | `<id> <task...>` | session_resume |
-| `/sessions-send` | `<id> <text...>` | session_send |
-| `/sessions-read` | `<id>` | session_read |
-| `/sessions-approve` | `<id> <requestId>` | session_respond(true) |
-| `/sessions-deny` | `<id> <requestId>` | session_respond(false) |
-| `/sessions-switch` | `<id> <mode>` | session_switch |
-| `/sessions-stop` | `<id> [--force]` | session_stop |
-| `/sessions-summary` | `<id>` | session_summary |
+| `/sessions_list` | (none) | session_list |
+| `/sessions_spawn` | `<provider> <cwd> <task...>` | session_spawn |
+| `/sessions_resume` | `<id> <task...>` | session_resume |
+| `/sessions_send` | `<id> <text...>` | session_send |
+| `/sessions_read` | `<id>` | session_read |
+| `/sessions_approve` | `<id> <requestId>` | session_respond(true) |
+| `/sessions_deny` | `<id> <requestId>` | session_respond(false) |
+| `/sessions_switch` | `<id> <mode>` | session_switch |
+| `/sessions_stop` | `<id> [--force]` | session_stop |
+| `/sessions_summary` | `<id>` | session_summary |
 
 ## Architecture
 
@@ -31,7 +31,7 @@ All use `sessions-` prefix to avoid conflicts with OpenClaw reserved names.
 - Called from `register()` in `openclaw-plugin.ts`
 - Args parsing: simple space-split, rest-of-string for task/text params
 - ACL: `ctx.senderId` → `CallerContext.userId`
-- All commands: `requireAuth: true`, `acceptsArgs: true` (except `sessions-list`)
+- All commands: `requireAuth: true`, `acceptsArgs: true` (except `sessions_list`)
 - Error response: return `{ text: "Usage: ..." }` on bad args
 
 ## Key Decisions

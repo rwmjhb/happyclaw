@@ -1,8 +1,10 @@
 # HappyClaw 技术方案评审报告（合并版）
 
+> **注意**: 本文评审的是 v1（PTY-based）方案，该方案已被 v2（SDK-first）取代。v2 评审见 `consolidated-review-v2.md`。
+
 > 评审日期：2026-02-09
 > 评审方式：三位 AI Agent 并行评审（Tech Lead / Security Reviewer / Product Manager）
-> 评审对象：`docs/technical-proposal.md`
+> 评审对象：`docs/technical-proposal.md` (v1)
 
 ---
 
