@@ -22,6 +22,24 @@ import { registerSessionCommands } from "./openclaw-commands.js";
 import type { CallerContext, SessionMessage } from "./types/index.js";
 
 // ---------------------------------------------------------------------------
+// Session key parsing — extract TG chat ID from OpenClaw session key
+// Format: "agent:{agentId}:{channel}:{peerKind}:{peerId}"
+// e.g.  "agent:tgclaude:telegram:group:-5190588761"
+// ---------------------------------------------------------------------------
+
+function extractChatIdFromSessionKey(sessionKey?: string): string | undefined {
+  if (!sessionKey) return undefined;
+  const parts = sessionKey.split(":");
+  // agent:{agentId}:{channel}:{peerKind}:{peerId...}
+  // parts[0]="agent", [1]=agentId, [2]=channel, [3]=peerKind, [4...]=peerId
+  if (parts.length >= 5 && parts[0] === "agent") {
+    // peerId may contain colons (unlikely for TG but be safe)
+    return parts.slice(4).join(":");
+  }
+  return undefined;
+}
+
+// ---------------------------------------------------------------------------
 // Minimal OpenClaw Plugin SDK types (avoid hard dependency on openclaw)
 // ---------------------------------------------------------------------------
 
@@ -149,9 +167,10 @@ const happyclawPlugin = {
 
     // --- Register tools via factory (captures per-agent caller context) ---
     api.registerTool((ctx: OpenClawPluginToolContext) => {
+      const chatId = extractChatIdFromSessionKey(ctx.sessionKey);
       const caller: CallerContext = {
         userId: ctx.agentAccountId ?? "anonymous",
-        channelId: ctx.messageChannel ?? "unknown",
+        channelId: chatId ?? ctx.messageChannel ?? "unknown",
       };
       return createOpenClawTools(manager, auditLogger, caller, pushAdapter);
     });
@@ -497,7 +516,7 @@ function createOpenClawTools(
         }
 
         // Bind push adapter so Claude output goes directly to TG
-        pushAdapter?.bindSession(session.id);
+        pushAdapter?.bindSession(session.id, caller.channelId);
 
         log("spawn", session.id, {
           provider: params.provider,
@@ -569,7 +588,7 @@ function createOpenClawTools(
           initialPrompt: params.task as string,
         });
 
-        pushAdapter?.bindSession(session.id);
+        pushAdapter?.bindSession(session.id, caller.channelId);
 
         log("resume", sessionId);
         return textResult({
