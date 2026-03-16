@@ -709,7 +709,7 @@ describe("createOpenClawTools", () => {
         id: "codex-pending-123",
         provider: "codex",
       });
-      (codexSession as Record<string, unknown>).realSessionId =
+      (codexSession as unknown as Record<string, unknown>).realSessionId =
         "real-codex-id-456";
       codexProvider._setNextSession(codexSession);
 
