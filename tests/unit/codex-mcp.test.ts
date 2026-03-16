@@ -1,12 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { EventEmitter } from 'node:events';
-import type {
-  JsonRpcNotification,
-} from '../../src/providers/mcp-bridge.js';
-import type {
-  SessionEvent,
-  SessionMessage,
-} from '../../src/types/index.js';
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { EventEmitter } from "node:events";
+import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import type { JsonRpcNotification } from "../../src/providers/mcp-bridge.js";
+import type { SessionEvent, SessionMessage } from "../../src/types/index.js";
 
 // ---------------------------------------------------------------------------
 // Track mock children for per-test access (used by McpStdioBridge tests)
@@ -14,7 +12,7 @@ import type {
 
 let mockChildren: any[] = [];
 
-vi.mock('node:child_process', () => ({
+vi.mock("node:child_process", () => ({
   spawn: vi.fn(() => {
     const child = new EventEmitter() as any;
     child.stdin = { write: vi.fn() };
@@ -24,12 +22,12 @@ vi.mock('node:child_process', () => ({
     child.killed = false;
     child.kill = vi.fn(() => {
       child.killed = true;
-      child.emit('exit', 0, null);
+      child.emit("exit", 0, null);
     });
     mockChildren.push(child);
     return child;
   }),
-  execSync: vi.fn(() => '/usr/local/bin/codex'),
+  execSync: vi.fn(() => "/usr/local/bin/codex"),
 }));
 
 // ---------------------------------------------------------------------------
@@ -45,10 +43,10 @@ let mockConnectFn: ReturnType<typeof vi.fn>;
 /** Set before creating CodexMCPSession to make connect() reject */
 let nextConnectError: Error | null = null;
 
-vi.mock('@modelcontextprotocol/sdk/client/index.js', () => {
+vi.mock("@modelcontextprotocol/sdk/client/index.js", () => {
   const MockClient = function (this: any) {
     mockCallToolFn = vi.fn().mockResolvedValue({
-      content: [{ type: 'text', text: 'Done' }],
+      content: [{ type: "text", text: "Done" }],
     });
     mockClientCloseFn = vi.fn().mockResolvedValue(undefined);
     mockConnectFn = vi.fn().mockImplementation(() => {
@@ -76,7 +74,7 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => {
 
 let mockTransportInstances: any[] = [];
 
-vi.mock('@modelcontextprotocol/sdk/client/stdio.js', () => {
+vi.mock("@modelcontextprotocol/sdk/client/stdio.js", () => {
   const MockTransport = function (this: any) {
     this.pid = 12345;
     this.stderr = new EventEmitter();
@@ -89,145 +87,153 @@ vi.mock('@modelcontextprotocol/sdk/client/stdio.js', () => {
   return { StdioClientTransport: MockTransport };
 });
 
-vi.mock('@modelcontextprotocol/sdk/types.js', () => ({
-  ElicitRequestSchema: { method: 'elicitation/create' },
+vi.mock("@modelcontextprotocol/sdk/types.js", () => ({
+  ElicitRequestSchema: { method: "elicitation/create" },
 }));
 
-vi.mock('zod', () => ({
+vi.mock("zod", () => ({
   z: {
     object: vi.fn().mockReturnValue({
-      passthrough: vi.fn().mockReturnValue('mock-schema'),
+      passthrough: vi.fn().mockReturnValue("mock-schema"),
     }),
-    literal: vi.fn().mockReturnValue('mock-literal'),
-    any: vi.fn().mockReturnValue('mock-any'),
+    literal: vi.fn().mockReturnValue("mock-literal"),
+    any: vi.fn().mockReturnValue("mock-any"),
   },
 }));
 
 // Import after mocks
-import { McpStdioBridge } from '../../src/providers/mcp-bridge.js';
-import { CodexMCPProvider, CodexMCPSession } from '../../src/providers/codex-mcp.js';
+import { McpStdioBridge } from "../../src/providers/mcp-bridge.js";
+import {
+  CodexMCPProvider,
+  CodexMCPSession,
+  findCodexResumeFile,
+} from "../../src/providers/codex-mcp.js";
 
 // ---------------------------------------------------------------------------
 // McpStdioBridge tests (preserved — tests valid code in mcp-bridge.ts)
 // ---------------------------------------------------------------------------
 
-describe('McpStdioBridge', () => {
+describe("McpStdioBridge", () => {
   let bridge: McpStdioBridge;
   let child: any;
 
   beforeEach(() => {
     mockChildren = [];
-    bridge = new McpStdioBridge('codex', ['--mcp'], { cwd: '/tmp' });
+    bridge = new McpStdioBridge("codex", ["--mcp"], { cwd: "/tmp" });
     child = mockChildren[mockChildren.length - 1];
   });
 
-  it('starts as alive', () => {
+  it("starts as alive", () => {
     expect(bridge.isAlive).toBe(true);
   });
 
-  it('has a pid', () => {
+  it("has a pid", () => {
     expect(bridge.pid).toBe(99999);
   });
 
-  describe('writeMessage format', () => {
-    it('sends Content-Length framed JSON-RPC via notify', () => {
-      bridge.notify('test/method', { foo: 'bar' });
+  describe("writeMessage format", () => {
+    it("sends Content-Length framed JSON-RPC via notify", () => {
+      bridge.notify("test/method", { foo: "bar" });
 
       const writeCall = child.stdin.write.mock.calls[0]?.[0] as string;
-      expect(writeCall).toContain('Content-Length:');
+      expect(writeCall).toContain("Content-Length:");
       expect(writeCall).toContain('"jsonrpc":"2.0"');
       expect(writeCall).toContain('"method":"test/method"');
     });
   });
 
-  describe('processBuffer (Content-Length framing)', () => {
-    it('parses a complete JSON-RPC response and resolves pending request', async () => {
-      const requestPromise = bridge.request('test/method', { arg: 1 });
+  describe("processBuffer (Content-Length framing)", () => {
+    it("parses a complete JSON-RPC response and resolves pending request", async () => {
+      const requestPromise = bridge.request("test/method", { arg: 1 });
 
       const response = JSON.stringify({
-        jsonrpc: '2.0',
+        jsonrpc: "2.0",
         id: 1,
-        result: { status: 'ok' },
+        result: { status: "ok" },
       });
       const frame = `Content-Length: ${Buffer.byteLength(response)}\r\n\r\n${response}`;
-      child.stdout.emit('data', Buffer.from(frame));
+      child.stdout.emit("data", Buffer.from(frame));
 
       const result = await requestPromise;
-      expect(result).toEqual({ status: 'ok' });
+      expect(result).toEqual({ status: "ok" });
     });
 
-    it('rejects pending request on error response', async () => {
-      const requestPromise = bridge.request('fail/method');
+    it("rejects pending request on error response", async () => {
+      const requestPromise = bridge.request("fail/method");
 
       const response = JSON.stringify({
-        jsonrpc: '2.0',
+        jsonrpc: "2.0",
         id: 1,
-        error: { code: -32600, message: 'Invalid Request' },
+        error: { code: -32600, message: "Invalid Request" },
       });
       const frame = `Content-Length: ${Buffer.byteLength(response)}\r\n\r\n${response}`;
-      child.stdout.emit('data', Buffer.from(frame));
+      child.stdout.emit("data", Buffer.from(frame));
 
       await expect(requestPromise).rejects.toThrow(/Invalid Request/);
     });
 
-    it('emits notification events for server-initiated messages', () => {
+    it("emits notification events for server-initiated messages", () => {
       const notifications: JsonRpcNotification[] = [];
-      bridge.on('notification', (n: JsonRpcNotification) => notifications.push(n));
+      bridge.on("notification", (n: JsonRpcNotification) =>
+        notifications.push(n),
+      );
 
       const notification = JSON.stringify({
-        jsonrpc: '2.0',
-        method: 'notifications/message',
-        params: { text: 'hello' },
+        jsonrpc: "2.0",
+        method: "notifications/message",
+        params: { text: "hello" },
       });
       const frame = `Content-Length: ${Buffer.byteLength(notification)}\r\n\r\n${notification}`;
-      child.stdout.emit('data', Buffer.from(frame));
+      child.stdout.emit("data", Buffer.from(frame));
 
       expect(notifications).toHaveLength(1);
-      expect(notifications[0].method).toBe('notifications/message');
+      expect(notifications[0].method).toBe("notifications/message");
     });
 
-    it('handles partial data (multiple chunks)', async () => {
-      const requestPromise = bridge.request('chunked/test');
+    it("handles partial data (multiple chunks)", async () => {
+      const requestPromise = bridge.request("chunked/test");
 
       const response = JSON.stringify({
-        jsonrpc: '2.0',
+        jsonrpc: "2.0",
         id: 1,
-        result: 'chunked',
+        result: "chunked",
       });
       const frame = `Content-Length: ${Buffer.byteLength(response)}\r\n\r\n${response}`;
 
       const mid = Math.floor(frame.length / 2);
-      child.stdout.emit('data', Buffer.from(frame.slice(0, mid)));
-      child.stdout.emit('data', Buffer.from(frame.slice(mid)));
+      child.stdout.emit("data", Buffer.from(frame.slice(0, mid)));
+      child.stdout.emit("data", Buffer.from(frame.slice(mid)));
 
       const result = await requestPromise;
-      expect(result).toBe('chunked');
+      expect(result).toBe("chunked");
     });
 
-    it('handles malformed header gracefully', () => {
+    it("handles malformed header gracefully", () => {
       const notifications: JsonRpcNotification[] = [];
-      bridge.on('notification', (n: JsonRpcNotification) => notifications.push(n));
+      bridge.on("notification", (n: JsonRpcNotification) =>
+        notifications.push(n),
+      );
 
       // Malformed header followed by valid message
-      const malformed = 'Bad-Header: oops\r\n\r\n';
+      const malformed = "Bad-Header: oops\r\n\r\n";
       const valid = JSON.stringify({
-        jsonrpc: '2.0',
-        method: 'test/ok',
+        jsonrpc: "2.0",
+        method: "test/ok",
         params: {},
       });
       const validFrame = `Content-Length: ${Buffer.byteLength(valid)}\r\n\r\n${valid}`;
 
-      child.stdout.emit('data', Buffer.from(malformed + validFrame));
+      child.stdout.emit("data", Buffer.from(malformed + validFrame));
 
       expect(notifications).toHaveLength(1);
-      expect(notifications[0].method).toBe('test/ok');
+      expect(notifications[0].method).toBe("test/ok");
     });
   });
 
-  describe('close', () => {
-    it('rejects all pending requests on close', async () => {
-      const p1 = bridge.request('pending/1');
-      const p2 = bridge.request('pending/2');
+  describe("close", () => {
+    it("rejects all pending requests on close", async () => {
+      const p1 = bridge.request("pending/1");
+      const p2 = bridge.request("pending/2");
 
       await bridge.close(true);
 
@@ -235,17 +241,17 @@ describe('McpStdioBridge', () => {
       await expect(p2).rejects.toThrow(/closed/i);
     });
 
-    it('marks bridge as not alive after close', async () => {
+    it("marks bridge as not alive after close", async () => {
       await bridge.close(true);
       expect(bridge.isAlive).toBe(false);
     });
   });
 
-  describe('exit handling', () => {
-    it('rejects pending requests when child process exits', async () => {
-      const p = bridge.request('will/fail');
+  describe("exit handling", () => {
+    it("rejects pending requests when child process exits", async () => {
+      const p = bridge.request("will/fail");
 
-      child.emit('exit', 1, 'SIGTERM');
+      child.emit("exit", 1, "SIGTERM");
 
       await expect(p).rejects.toThrow(/exited/i);
     });
@@ -256,20 +262,20 @@ describe('McpStdioBridge', () => {
 // CodexMCPProvider tests
 // ---------------------------------------------------------------------------
 
-describe('CodexMCPProvider', () => {
+describe("CodexMCPProvider", () => {
   beforeEach(() => {
     mockChildren = [];
   });
 
   it('has name "codex"', () => {
     const provider = new CodexMCPProvider();
-    expect(provider.name).toBe('codex');
+    expect(provider.name).toBe("codex");
   });
 
-  it('supports local and remote modes', () => {
+  it("supports local and remote modes", () => {
     const provider = new CodexMCPProvider();
-    expect(provider.supportedModes).toContain('local');
-    expect(provider.supportedModes).toContain('remote');
+    expect(provider.supportedModes).toContain("local");
+    expect(provider.supportedModes).toContain("remote");
   });
 });
 
@@ -277,7 +283,7 @@ describe('CodexMCPProvider', () => {
 // CodexMCPSession tests — new implementation
 // ---------------------------------------------------------------------------
 
-describe('CodexMCPSession', () => {
+describe("CodexMCPSession", () => {
   let session: CodexMCPSession;
   let events: SessionEvent[];
   let messages: SessionMessage[];
@@ -293,8 +299,8 @@ describe('CodexMCPSession', () => {
     messages = [];
 
     session = new CodexMCPSession({
-      cwd: '/tmp/test',
-      mode: 'remote',
+      cwd: "/tmp/test",
+      mode: "remote",
     });
 
     session.onEvent((e) => events.push(e));
@@ -308,91 +314,91 @@ describe('CodexMCPSession', () => {
   // --- Basic properties ---
 
   it('has provider set to "codex"', () => {
-    expect(session.provider).toBe('codex');
+    expect(session.provider).toBe("codex");
   });
 
-  it('generates a pending session id before first tool call', () => {
+  it("generates a pending session id before first tool call", () => {
     expect(session.id).toMatch(/^codex-pending-/);
   });
 
-  it('has pid from transport', () => {
+  it("has pid from transport", () => {
     expect(session.pid).toBe(12345);
   });
 
-  it('mode defaults to remote', () => {
-    expect(session.mode).toBe('remote');
+  it("mode defaults to remote", () => {
+    expect(session.mode).toBe("remote");
   });
 
   // --- MCP connection ---
 
-  it('connects to MCP server on initialization', () => {
+  it("connects to MCP server on initialization", () => {
     expect(mockConnectFn).toHaveBeenCalled();
   });
 
-  it('registers notification handler for codex/event', () => {
+  it("registers notification handler for codex/event", () => {
     expect(mockNotificationHandler).not.toBeNull();
   });
 
-  it('registers request handler for Elicitation', () => {
+  it("registers request handler for Elicitation", () => {
     expect(mockRequestHandler).not.toBeNull();
   });
 
   // --- Two-tool flow ---
 
-  describe('two-tool flow', () => {
+  describe("two-tool flow", () => {
     it('first send calls "codex" tool', async () => {
-      await session.send('Write hello world');
+      await session.send("Write hello world");
       await vi.advanceTimersByTimeAsync(0);
 
       expect(mockCallToolFn).toHaveBeenCalledWith(
-        expect.objectContaining({ name: 'codex' }),
+        expect.objectContaining({ name: "codex" }),
         undefined,
         expect.any(Object),
       );
 
       const args = mockCallToolFn.mock.calls[0][0].arguments;
-      expect(args.prompt).toBe('Write hello world');
-      expect(args['approval-policy']).toBe('untrusted');
-      expect(args.sandbox).toBe('workspace-write');
-      expect(args.cwd).toBe('/tmp/test');
+      expect(args.prompt).toBe("Write hello world");
+      expect(args["approval-policy"]).toBe("untrusted");
+      expect(args.sandbox).toBe("workspace-write");
+      expect(args.cwd).toBe("/tmp/test");
     });
 
     it('second send calls "codex-reply" tool', async () => {
       // Simulate first call returning session IDs
       mockCallToolFn.mockResolvedValueOnce({
-        content: [{ type: 'text', text: 'Started' }],
-        sessionId: 'sess-123',
-        conversationId: 'conv-456',
+        content: [{ type: "text", text: "Started" }],
+        sessionId: "sess-123",
+        conversationId: "conv-456",
       });
 
-      await session.send('First message');
+      await session.send("First message");
       await vi.advanceTimersByTimeAsync(0);
 
-      await session.send('Follow up');
+      await session.send("Follow up");
       await vi.advanceTimersByTimeAsync(0);
 
       expect(mockCallToolFn).toHaveBeenCalledTimes(2);
       const secondCall = mockCallToolFn.mock.calls[1][0];
-      expect(secondCall.name).toBe('codex-reply');
-      expect(secondCall.arguments.sessionId).toBe('sess-123');
-      expect(secondCall.arguments.conversationId).toBe('conv-456');
-      expect(secondCall.arguments.prompt).toBe('Follow up');
+      expect(secondCall.name).toBe("codex-reply");
+      expect(secondCall.arguments.sessionId).toBe("sess-123");
+      expect(secondCall.arguments.conversationId).toBe("conv-456");
+      expect(secondCall.arguments.prompt).toBe("Follow up");
     });
 
-    it('uses codex tool with initialPrompt on construction', async () => {
+    it("uses codex tool with initialPrompt on construction", async () => {
       const sessionWithPrompt = new CodexMCPSession({
-        cwd: '/tmp',
-        mode: 'remote',
-        initialPrompt: 'Hello from initialPrompt',
+        cwd: "/tmp",
+        mode: "remote",
+        initialPrompt: "Hello from initialPrompt",
       });
       await vi.advanceTimersByTimeAsync(0);
 
       // The initial prompt triggers startSession in initialize()
       expect(mockCallToolFn).toHaveBeenCalledWith(
         expect.objectContaining({
-          name: 'codex',
+          name: "codex",
           arguments: expect.objectContaining({
-            prompt: 'Hello from initialPrompt',
+            prompt: "Hello from initialPrompt",
           }),
         }),
         undefined,
@@ -400,100 +406,100 @@ describe('CodexMCPSession', () => {
       );
     });
 
-    it('sends stopped error when session is stopped', async () => {
+    it("sends stopped error when session is stopped", async () => {
       await session.stop();
-      await expect(session.send('test')).rejects.toThrow(/stopped/);
+      await expect(session.send("test")).rejects.toThrow(/stopped/);
     });
   });
 
   // --- Execution policy mapping ---
 
-  describe('execution policy mapping', () => {
-    it('default mode maps to untrusted + workspace-write', async () => {
-      await session.send('test');
+  describe("execution policy mapping", () => {
+    it("default mode maps to untrusted + workspace-write", async () => {
+      await session.send("test");
       await vi.advanceTimersByTimeAsync(0);
 
       const args = mockCallToolFn.mock.calls[0][0].arguments;
-      expect(args['approval-policy']).toBe('untrusted');
-      expect(args.sandbox).toBe('workspace-write');
+      expect(args["approval-policy"]).toBe("untrusted");
+      expect(args.sandbox).toBe("workspace-write");
     });
 
-    it('bypassPermissions maps to never + danger-full-access', async () => {
+    it("bypassPermissions maps to never + danger-full-access", async () => {
       const s = new CodexMCPSession({
-        cwd: '/tmp',
-        mode: 'remote',
-        permissionMode: 'bypassPermissions',
+        cwd: "/tmp",
+        mode: "remote",
+        permissionMode: "bypassPermissions",
       });
       s.onMessage(() => {});
-      await s.send('test');
+      await s.send("test");
       await vi.advanceTimersByTimeAsync(0);
 
       const args = mockCallToolFn.mock.calls[0][0].arguments;
-      expect(args['approval-policy']).toBe('never');
-      expect(args.sandbox).toBe('danger-full-access');
+      expect(args["approval-policy"]).toBe("never");
+      expect(args.sandbox).toBe("danger-full-access");
     });
 
-    it('acceptEdits maps to on-request + workspace-write', async () => {
+    it("acceptEdits maps to on-request + workspace-write", async () => {
       const s = new CodexMCPSession({
-        cwd: '/tmp',
-        mode: 'remote',
-        permissionMode: 'acceptEdits',
+        cwd: "/tmp",
+        mode: "remote",
+        permissionMode: "acceptEdits",
       });
-      await s.send('test');
+      await s.send("test");
       await vi.advanceTimersByTimeAsync(0);
 
       const args = mockCallToolFn.mock.calls[0][0].arguments;
-      expect(args['approval-policy']).toBe('on-request');
-      expect(args.sandbox).toBe('workspace-write');
+      expect(args["approval-policy"]).toBe("on-request");
+      expect(args.sandbox).toBe("workspace-write");
     });
 
-    it('plan maps to untrusted + read-only', async () => {
+    it("plan maps to untrusted + read-only", async () => {
       const s = new CodexMCPSession({
-        cwd: '/tmp',
-        mode: 'remote',
-        permissionMode: 'plan',
+        cwd: "/tmp",
+        mode: "remote",
+        permissionMode: "plan",
       });
-      await s.send('test');
+      await s.send("test");
       await vi.advanceTimersByTimeAsync(0);
 
       const args = mockCallToolFn.mock.calls[0][0].arguments;
-      expect(args['approval-policy']).toBe('untrusted');
-      expect(args.sandbox).toBe('read-only');
+      expect(args["approval-policy"]).toBe("untrusted");
+      expect(args.sandbox).toBe("read-only");
     });
   });
 
   // --- Config building ---
 
-  describe('config building', () => {
-    it('includes model when provided', async () => {
+  describe("config building", () => {
+    it("includes model when provided", async () => {
       const s = new CodexMCPSession({
-        cwd: '/tmp',
-        mode: 'remote',
-        model: 'o3-mini',
+        cwd: "/tmp",
+        mode: "remote",
+        model: "o3-mini",
       });
-      await s.send('test');
+      await s.send("test");
       await vi.advanceTimersByTimeAsync(0);
 
       const args = mockCallToolFn.mock.calls[0][0].arguments;
-      expect(args.model).toBe('o3-mini');
+      expect(args.model).toBe("o3-mini");
     });
 
-    it('includes mcp_servers when provided', async () => {
-      const mcpServers = { happy: { command: 'node', args: ['server.js'] } };
+    it("includes mcp_servers when provided", async () => {
+      const mcpServers = { happy: { command: "node", args: ["server.js"] } };
       const s = new CodexMCPSession({
-        cwd: '/tmp',
-        mode: 'remote',
+        cwd: "/tmp",
+        mode: "remote",
         mcpServers,
       });
-      await s.send('test');
+      await s.send("test");
       await vi.advanceTimersByTimeAsync(0);
 
       const args = mockCallToolFn.mock.calls[0][0].arguments;
       expect(args.config).toEqual({ mcp_servers: mcpServers });
     });
 
-    it('uses 14-day timeout for tool calls', async () => {
-      await session.send('test');
+    it("uses 14-day timeout for tool calls", async () => {
+      await session.send("test");
       await vi.advanceTimersByTimeAsync(0);
 
       const options = mockCallToolFn.mock.calls[0][2];
@@ -503,142 +509,146 @@ describe('CodexMCPSession', () => {
 
   // --- Event mapping ---
 
-  describe('event mapping', () => {
+  describe("event mapping", () => {
     function emitCodexEvent(msg: Record<string, unknown>): void {
       mockNotificationHandler?.({
-        method: 'codex/event',
+        method: "codex/event",
         params: { msg },
       });
     }
 
-    it('agent_message -> text message', () => {
-      emitCodexEvent({ type: 'agent_message', message: 'Hello world' });
+    it("agent_message -> text message", () => {
+      emitCodexEvent({ type: "agent_message", message: "Hello world" });
 
       expect(messages).toHaveLength(1);
-      expect(messages[0].type).toBe('text');
-      expect(messages[0].content).toBe('Hello world');
+      expect(messages[0].type).toBe("text");
+      expect(messages[0].content).toBe("Hello world");
     });
 
-    it('agent_reasoning is skipped (not buffered)', () => {
-      emitCodexEvent({ type: 'agent_reasoning', text: 'Let me think...' });
+    it("agent_reasoning is skipped (not buffered)", () => {
+      emitCodexEvent({ type: "agent_reasoning", text: "Let me think..." });
 
       // agent_reasoning is no longer buffered — it was always filtered by
       // the TG formatter anyway, and buffering triggered wasted flush cycles.
       expect(messages).toHaveLength(0);
     });
 
-    it('agent_reasoning_delta is skipped', () => {
-      emitCodexEvent({ type: 'agent_reasoning_delta', delta: 'token' });
+    it("agent_reasoning_delta is skipped", () => {
+      emitCodexEvent({ type: "agent_reasoning_delta", delta: "token" });
       expect(messages).toHaveLength(0);
     });
 
-    it('agent_reasoning_section_break is skipped', () => {
-      emitCodexEvent({ type: 'agent_reasoning_section_break' });
+    it("agent_reasoning_section_break is skipped", () => {
+      emitCodexEvent({ type: "agent_reasoning_section_break" });
       expect(messages).toHaveLength(0);
     });
 
-    it('token_count is skipped', () => {
-      emitCodexEvent({ type: 'token_count', input: 100, output: 50 });
+    it("token_count is skipped", () => {
+      emitCodexEvent({ type: "token_count", input: 100, output: 50 });
       expect(messages).toHaveLength(0);
     });
 
-    it('exec_command_begin -> tool_use message', () => {
+    it("exec_command_begin -> tool_use message", () => {
       emitCodexEvent({
-        type: 'exec_command_begin',
-        command: 'ls -la /tmp',
-        call_id: 'call-1',
+        type: "exec_command_begin",
+        command: "ls -la /tmp",
+        call_id: "call-1",
       });
 
       expect(messages).toHaveLength(1);
-      expect(messages[0].type).toBe('tool_use');
-      expect(messages[0].content).toBe('ls -la /tmp');
-      expect(messages[0].metadata?.tool).toBe('CodexBash');
-      expect(messages[0].metadata?.sdkMessageId).toBe('call-1');
+      expect(messages[0].type).toBe("tool_use");
+      expect(messages[0].content).toBe("ls -la /tmp");
+      expect(messages[0].metadata?.tool).toBe("CodexBash");
+      expect(messages[0].metadata?.sdkMessageId).toBe("call-1");
     });
 
-    it('exec_command_end -> tool_result message with output', () => {
+    it("exec_command_end -> tool_result message with output", () => {
       emitCodexEvent({
-        type: 'exec_command_end',
-        output: 'file1.txt\nfile2.txt',
-        call_id: 'call-1',
+        type: "exec_command_end",
+        output: "file1.txt\nfile2.txt",
+        call_id: "call-1",
       });
 
       expect(messages).toHaveLength(1);
-      expect(messages[0].type).toBe('tool_result');
-      expect(messages[0].content).toBe('file1.txt\nfile2.txt');
+      expect(messages[0].type).toBe("tool_result");
+      expect(messages[0].content).toBe("file1.txt\nfile2.txt");
     });
 
-    it('exec_command_end -> tool_result message with error', () => {
+    it("exec_command_end -> tool_result message with error", () => {
       emitCodexEvent({
-        type: 'exec_command_end',
-        error: 'Permission denied',
-        call_id: 'call-2',
+        type: "exec_command_end",
+        error: "Permission denied",
+        call_id: "call-2",
       });
 
       expect(messages).toHaveLength(1);
-      expect(messages[0].type).toBe('tool_result');
-      expect(messages[0].content).toBe('Permission denied');
+      expect(messages[0].type).toBe("tool_result");
+      expect(messages[0].content).toBe("Permission denied");
     });
 
-    it('exec_approval_request -> permission_request event', () => {
+    it("exec_approval_request -> permission_request event", () => {
       emitCodexEvent({
-        type: 'exec_approval_request',
-        command: ['rm', '-rf', '/tmp/test'],
-        cwd: '/home/user',
-        call_id: 'call-perm',
+        type: "exec_approval_request",
+        command: ["rm", "-rf", "/tmp/test"],
+        cwd: "/home/user",
+        call_id: "call-perm",
       });
 
-      const permEvent = events.find((e) => e.type === 'permission_request');
+      const permEvent = events.find((e) => e.type === "permission_request");
       expect(permEvent).toBeDefined();
-      expect(permEvent!.permissionDetail?.requestId).toBe('call-perm');
-      expect(permEvent!.permissionDetail?.toolName).toBe('CodexBash');
-      expect(permEvent!.permissionDetail?.command).toEqual(['rm', '-rf', '/tmp/test']);
-      expect(permEvent!.permissionDetail?.cwd).toBe('/home/user');
+      expect(permEvent!.permissionDetail?.requestId).toBe("call-perm");
+      expect(permEvent!.permissionDetail?.toolName).toBe("CodexBash");
+      expect(permEvent!.permissionDetail?.command).toEqual([
+        "rm",
+        "-rf",
+        "/tmp/test",
+      ]);
+      expect(permEvent!.permissionDetail?.cwd).toBe("/home/user");
     });
 
-    it('patch_apply_begin -> tool_use message with file names', () => {
+    it("patch_apply_begin -> tool_use message with file names", () => {
       emitCodexEvent({
-        type: 'patch_apply_begin',
-        changes: { 'src/main.ts': {}, 'src/utils.ts': {} },
-        call_id: 'patch-1',
+        type: "patch_apply_begin",
+        changes: { "src/main.ts": {}, "src/utils.ts": {} },
+        call_id: "patch-1",
       });
 
       expect(messages).toHaveLength(1);
-      expect(messages[0].type).toBe('tool_use');
-      expect(messages[0].content).toContain('src/main.ts');
-      expect(messages[0].content).toContain('src/utils.ts');
-      expect(messages[0].metadata?.tool).toBe('CodexPatch');
+      expect(messages[0].type).toBe("tool_use");
+      expect(messages[0].content).toContain("src/main.ts");
+      expect(messages[0].content).toContain("src/utils.ts");
+      expect(messages[0].metadata?.tool).toBe("CodexPatch");
     });
 
-    it('patch_apply_end success -> tool_result with stdout', () => {
+    it("patch_apply_end success -> tool_result with stdout", () => {
       emitCodexEvent({
-        type: 'patch_apply_end',
+        type: "patch_apply_end",
         success: true,
-        stdout: 'Applied successfully',
-        call_id: 'patch-1',
+        stdout: "Applied successfully",
+        call_id: "patch-1",
       });
 
       expect(messages).toHaveLength(1);
-      expect(messages[0].type).toBe('tool_result');
-      expect(messages[0].content).toBe('Applied successfully');
+      expect(messages[0].type).toBe("tool_result");
+      expect(messages[0].content).toBe("Applied successfully");
     });
 
-    it('patch_apply_end failure -> tool_result with stderr', () => {
+    it("patch_apply_end failure -> tool_result with stderr", () => {
       emitCodexEvent({
-        type: 'patch_apply_end',
+        type: "patch_apply_end",
         success: false,
-        stderr: 'Conflict in file',
-        call_id: 'patch-2',
+        stderr: "Conflict in file",
+        call_id: "patch-2",
       });
 
       expect(messages).toHaveLength(1);
-      expect(messages[0].content).toBe('Conflict in file');
+      expect(messages[0].content).toBe("Conflict in file");
     });
 
-    it('turn_diff is skipped (redundant with exec_command_end)', () => {
+    it("turn_diff is skipped (redundant with exec_command_end)", () => {
       emitCodexEvent({
-        type: 'turn_diff',
-        unified_diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+        type: "turn_diff",
+        unified_diff: "--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new",
       });
 
       // turn_diff is no longer buffered — its content duplicates what
@@ -646,35 +656,37 @@ describe('CodexMCPSession', () => {
       expect(messages).toHaveLength(0);
     });
 
-    it('turn_diff with empty diff is skipped', () => {
-      emitCodexEvent({ type: 'turn_diff', unified_diff: '' });
+    it("turn_diff with empty diff is skipped", () => {
+      emitCodexEvent({ type: "turn_diff", unified_diff: "" });
       expect(messages).toHaveLength(0);
     });
 
-    it('task_started -> ready event', () => {
-      emitCodexEvent({ type: 'task_started' });
+    it("task_started -> ready event", () => {
+      emitCodexEvent({ type: "task_started" });
 
-      const readyEvent = events.find((e) => e.type === 'ready' && e.summary.includes('task started'));
+      const readyEvent = events.find(
+        (e) => e.type === "ready" && e.summary.includes("task started"),
+      );
       expect(readyEvent).toBeDefined();
     });
 
-    it('task_complete -> task_complete event', () => {
-      emitCodexEvent({ type: 'task_complete' });
+    it("task_complete -> task_complete event", () => {
+      emitCodexEvent({ type: "task_complete" });
 
-      const completeEvent = events.find((e) => e.type === 'task_complete');
+      const completeEvent = events.find((e) => e.type === "task_complete");
       expect(completeEvent).toBeDefined();
     });
 
-    it('turn_aborted -> error event', () => {
-      emitCodexEvent({ type: 'turn_aborted', reason: 'User cancelled' });
+    it("turn_aborted -> error event", () => {
+      emitCodexEvent({ type: "turn_aborted", reason: "User cancelled" });
 
-      const errorEvent = events.find((e) => e.type === 'error');
+      const errorEvent = events.find((e) => e.type === "error");
       expect(errorEvent).toBeDefined();
-      expect(errorEvent!.summary).toContain('User cancelled');
+      expect(errorEvent!.summary).toContain("User cancelled");
     });
 
-    it('unknown event type is silently ignored', () => {
-      emitCodexEvent({ type: 'some_unknown_event' });
+    it("unknown event type is silently ignored", () => {
+      emitCodexEvent({ type: "some_unknown_event" });
       expect(messages).toHaveLength(0);
       // Only the ready event from initialize should be present
     });
@@ -682,179 +694,179 @@ describe('CodexMCPSession', () => {
 
   // --- Session ID extraction ---
 
-  describe('session ID extraction', () => {
+  describe("session ID extraction", () => {
     function emitCodexEvent(msg: Record<string, unknown>): void {
       mockNotificationHandler?.({
-        method: 'codex/event',
+        method: "codex/event",
         params: { msg },
       });
     }
 
-    it('extracts from tool response root', async () => {
+    it("extracts from tool response root", async () => {
       mockCallToolFn.mockResolvedValueOnce({
         content: [],
-        sessionId: 'from-root',
-        conversationId: 'conv-root',
+        sessionId: "from-root",
+        conversationId: "conv-root",
       });
 
-      await session.send('test');
+      await session.send("test");
       await vi.advanceTimersByTimeAsync(0);
 
       // id stays stable (pendingId), real ID stored internally
       expect(session.id).toMatch(/^codex-pending-/);
-      expect(session.realSessionId).toBe('from-root');
+      expect(session.realSessionId).toBe("from-root");
     });
 
-    it('extracts from tool response meta', async () => {
+    it("extracts from tool response meta", async () => {
       mockCallToolFn.mockResolvedValueOnce({
         content: [],
-        meta: { sessionId: 'from-meta', conversationId: 'conv-meta' },
+        meta: { sessionId: "from-meta", conversationId: "conv-meta" },
       });
 
-      await session.send('test');
+      await session.send("test");
       await vi.advanceTimersByTimeAsync(0);
 
       expect(session.id).toMatch(/^codex-pending-/);
-      expect(session.realSessionId).toBe('from-meta');
+      expect(session.realSessionId).toBe("from-meta");
     });
 
-    it('extracts from tool response content items', async () => {
+    it("extracts from tool response content items", async () => {
       mockCallToolFn.mockResolvedValueOnce({
-        content: [{ type: 'text', text: 'ok', sessionId: 'from-content' }],
+        content: [{ type: "text", text: "ok", sessionId: "from-content" }],
       });
 
-      await session.send('test');
+      await session.send("test");
       await vi.advanceTimersByTimeAsync(0);
 
       expect(session.id).toMatch(/^codex-pending-/);
-      expect(session.realSessionId).toBe('from-content');
+      expect(session.realSessionId).toBe("from-content");
     });
 
-    it('extracts from events with snake_case', () => {
+    it("extracts from events with snake_case", () => {
       emitCodexEvent({
-        type: 'agent_message',
-        message: 'hello',
-        session_id: 'snake-sess',
-        conversation_id: 'snake-conv',
+        type: "agent_message",
+        message: "hello",
+        session_id: "snake-sess",
+        conversation_id: "snake-conv",
       });
 
       expect(session.id).toMatch(/^codex-pending-/);
-      expect(session.realSessionId).toBe('snake-sess');
+      expect(session.realSessionId).toBe("snake-sess");
     });
 
-    it('extracts from events with camelCase', () => {
+    it("extracts from events with camelCase", () => {
       emitCodexEvent({
-        type: 'agent_message',
-        message: 'hello',
-        sessionId: 'camel-sess',
-        conversationId: 'camel-conv',
+        type: "agent_message",
+        message: "hello",
+        sessionId: "camel-sess",
+        conversationId: "camel-conv",
       });
 
       expect(session.id).toMatch(/^codex-pending-/);
-      expect(session.realSessionId).toBe('camel-sess');
+      expect(session.realSessionId).toBe("camel-sess");
     });
 
-    it('extracts from nested event.data', () => {
+    it("extracts from nested event.data", () => {
       emitCodexEvent({
-        type: 'agent_message',
-        message: 'hello',
-        data: { session_id: 'nested-sess' },
+        type: "agent_message",
+        message: "hello",
+        data: { session_id: "nested-sess" },
       });
 
       expect(session.id).toMatch(/^codex-pending-/);
-      expect(session.realSessionId).toBe('nested-sess');
+      expect(session.realSessionId).toBe("nested-sess");
     });
 
-    it('prefers threadId over sessionId in tool response (Codex >= 0.98)', async () => {
-      mockCallToolFn.mockResolvedValueOnce({
-        content: [],
-        threadId: 'thread-abc',
-        sessionId: 'sess-old',
-      });
-
-      await session.send('test');
-      await vi.advanceTimersByTimeAsync(0);
-
-      expect(session.id).toMatch(/^codex-pending-/);
-      expect(session.realSessionId).toBe('thread-abc');
-    });
-
-    it('prefers thread_id over session_id in events', () => {
-      emitCodexEvent({
-        type: 'agent_message',
-        message: 'hello',
-        thread_id: 'thread-from-event',
-        session_id: 'sess-from-event',
-      });
-
-      expect(session.id).toMatch(/^codex-pending-/);
-      expect(session.realSessionId).toBe('thread-from-event');
-    });
-
-    it('extracts threadId from response meta', async () => {
+    it("prefers threadId over sessionId in tool response (Codex >= 0.98)", async () => {
       mockCallToolFn.mockResolvedValueOnce({
         content: [],
-        meta: { threadId: 'thread-meta' },
+        threadId: "thread-abc",
+        sessionId: "sess-old",
       });
 
-      await session.send('test');
+      await session.send("test");
       await vi.advanceTimersByTimeAsync(0);
 
       expect(session.id).toMatch(/^codex-pending-/);
-      expect(session.realSessionId).toBe('thread-meta');
+      expect(session.realSessionId).toBe("thread-abc");
+    });
+
+    it("prefers thread_id over session_id in events", () => {
+      emitCodexEvent({
+        type: "agent_message",
+        message: "hello",
+        thread_id: "thread-from-event",
+        session_id: "sess-from-event",
+      });
+
+      expect(session.id).toMatch(/^codex-pending-/);
+      expect(session.realSessionId).toBe("thread-from-event");
+    });
+
+    it("extracts threadId from response meta", async () => {
+      mockCallToolFn.mockResolvedValueOnce({
+        content: [],
+        meta: { threadId: "thread-meta" },
+      });
+
+      await session.send("test");
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(session.id).toMatch(/^codex-pending-/);
+      expect(session.realSessionId).toBe("thread-meta");
     });
   });
 
   // --- Permission flow ---
 
-  describe('permission flow', () => {
-    it('Elicitation handler emits permission_request event', async () => {
+  describe("permission flow", () => {
+    it("Elicitation handler emits permission_request event", async () => {
       const promise = mockRequestHandler?.({
         params: {
-          codex_call_id: 'perm-1',
-          codex_command: ['rm', '-rf', '/'],
-          codex_cwd: '/home',
+          codex_call_id: "perm-1",
+          codex_command: ["rm", "-rf", "/"],
+          codex_cwd: "/home",
         },
       });
 
-      const permEvent = events.find((e) => e.type === 'permission_request');
+      const permEvent = events.find((e) => e.type === "permission_request");
       expect(permEvent).toBeDefined();
-      expect(permEvent!.permissionDetail?.requestId).toBe('perm-1');
-      expect(permEvent!.permissionDetail?.command).toEqual(['rm', '-rf', '/']);
-      expect(permEvent!.permissionDetail?.cwd).toBe('/home');
+      expect(permEvent!.permissionDetail?.requestId).toBe("perm-1");
+      expect(permEvent!.permissionDetail?.command).toEqual(["rm", "-rf", "/"]);
+      expect(permEvent!.permissionDetail?.cwd).toBe("/home");
 
       // Approve
-      await session.respondToPermission('perm-1', true);
+      await session.respondToPermission("perm-1", true);
       const result = await promise;
-      expect(result).toEqual({ action: 'approved' });
+      expect(result).toEqual({ action: "approved" });
     });
 
-    it('respondToPermission with deny returns denied decision', async () => {
+    it("respondToPermission with deny returns denied decision", async () => {
       const promise = mockRequestHandler?.({
         params: {
-          codex_call_id: 'perm-2',
-          codex_command: ['rm', 'file'],
-          codex_cwd: '/tmp',
+          codex_call_id: "perm-2",
+          codex_command: ["rm", "file"],
+          codex_cwd: "/tmp",
         },
       });
 
-      await session.respondToPermission('perm-2', false);
+      await session.respondToPermission("perm-2", false);
       const result = await promise;
-      expect(result).toEqual({ action: 'denied' });
+      expect(result).toEqual({ action: "denied" });
     });
 
-    it('throws when responding to unknown permission ID', async () => {
+    it("throws when responding to unknown permission ID", async () => {
       await expect(
-        session.respondToPermission('nonexistent', true),
+        session.respondToPermission("nonexistent", true),
       ).rejects.toThrow(/No pending permission request/);
     });
 
-    it('auto-denies after 5 minute timeout', async () => {
+    it("auto-denies after 5 minute timeout", async () => {
       const promise = mockRequestHandler?.({
         params: {
-          codex_call_id: 'perm-timeout',
-          codex_command: ['echo', 'hi'],
-          codex_cwd: '/tmp',
+          codex_call_id: "perm-timeout",
+          codex_command: ["echo", "hi"],
+          codex_cwd: "/tmp",
         },
       });
 
@@ -862,216 +874,216 @@ describe('CodexMCPSession', () => {
       await vi.advanceTimersByTimeAsync(300_001);
 
       const result = await promise;
-      expect(result).toEqual({ action: 'denied' });
+      expect(result).toEqual({ action: "denied" });
     });
 
-    it('uses codex_event_id as fallback for call_id', async () => {
+    it("uses codex_event_id as fallback for call_id", async () => {
       const promise = mockRequestHandler?.({
         params: {
-          codex_event_id: 'evt-fallback',
-          codex_command: ['ls'],
-          codex_cwd: '/tmp',
+          codex_event_id: "evt-fallback",
+          codex_command: ["ls"],
+          codex_cwd: "/tmp",
         },
       });
 
-      const permEvent = events.find((e) => e.type === 'permission_request');
-      expect(permEvent!.permissionDetail?.requestId).toBe('evt-fallback');
+      const permEvent = events.find((e) => e.type === "permission_request");
+      expect(permEvent!.permissionDetail?.requestId).toBe("evt-fallback");
 
-      await session.respondToPermission('evt-fallback', true);
+      await session.respondToPermission("evt-fallback", true);
       await promise;
     });
   });
 
   // --- Read ---
 
-  describe('read', () => {
+  describe("read", () => {
     function emitCodexEvent(msg: Record<string, unknown>): void {
       mockNotificationHandler?.({
-        method: 'codex/event',
+        method: "codex/event",
         params: { msg },
       });
     }
 
-    it('returns buffered messages with cursor pagination', async () => {
+    it("returns buffered messages with cursor pagination", async () => {
       for (let i = 0; i < 3; i++) {
-        emitCodexEvent({ type: 'agent_message', message: `message ${i}` });
+        emitCodexEvent({ type: "agent_message", message: `message ${i}` });
       }
 
       const result = await session.read({ limit: 2 });
       expect(result.messages).toHaveLength(2);
-      expect(result.nextCursor).toBe('2');
+      expect(result.nextCursor).toBe("2");
 
-      const result2 = await session.read({ cursor: '2', limit: 2 });
+      const result2 = await session.read({ cursor: "2", limit: 2 });
       expect(result2.messages).toHaveLength(1);
     });
 
-    it('returns empty for no messages', async () => {
+    it("returns empty for no messages", async () => {
       const result = await session.read();
       expect(result.messages).toHaveLength(0);
-      expect(result.nextCursor).toBe('0');
+      expect(result.nextCursor).toBe("0");
     });
   });
 
   // --- Stop / cleanup ---
 
-  describe('stop and cleanup', () => {
-    it('calls client.close on stop', async () => {
+  describe("stop and cleanup", () => {
+    it("calls client.close on stop", async () => {
       await session.stop();
       expect(mockClientCloseFn).toHaveBeenCalled();
     });
 
-    it('denies all pending permissions on stop', async () => {
+    it("denies all pending permissions on stop", async () => {
       const promise = mockRequestHandler?.({
         params: {
-          codex_call_id: 'perm-stop',
-          codex_command: ['echo'],
-          codex_cwd: '/tmp',
+          codex_call_id: "perm-stop",
+          codex_command: ["echo"],
+          codex_cwd: "/tmp",
         },
       });
 
       await session.stop();
       const result = await promise;
-      expect(result).toEqual({ action: 'denied' });
+      expect(result).toEqual({ action: "denied" });
     });
 
-    it('stop is idempotent', async () => {
+    it("stop is idempotent", async () => {
       await session.stop();
       await session.stop(); // should not throw
       expect(mockClientCloseFn).toHaveBeenCalledTimes(1);
     });
 
-    it('switchMode calls stop', async () => {
-      await session.switchMode('local');
+    it("switchMode calls stop", async () => {
+      await session.switchMode("local");
       expect(mockClientCloseFn).toHaveBeenCalled();
     });
   });
 
   // --- callId handling with camelCase fallback ---
 
-  describe('callId extraction from events', () => {
+  describe("callId extraction from events", () => {
     function emitCodexEvent(msg: Record<string, unknown>): void {
       mockNotificationHandler?.({
-        method: 'codex/event',
+        method: "codex/event",
         params: { msg },
       });
     }
 
-    it('uses call_id (snake_case)', () => {
+    it("uses call_id (snake_case)", () => {
       emitCodexEvent({
-        type: 'exec_command_begin',
-        command: 'echo hi',
-        call_id: 'snake-id',
+        type: "exec_command_begin",
+        command: "echo hi",
+        call_id: "snake-id",
       });
 
-      expect(messages[0].metadata?.sdkMessageId).toBe('snake-id');
+      expect(messages[0].metadata?.sdkMessageId).toBe("snake-id");
     });
 
-    it('falls back to callId (camelCase)', () => {
+    it("falls back to callId (camelCase)", () => {
       emitCodexEvent({
-        type: 'exec_command_begin',
-        command: 'echo hi',
-        callId: 'camel-id',
+        type: "exec_command_begin",
+        command: "echo hi",
+        callId: "camel-id",
       });
 
-      expect(messages[0].metadata?.sdkMessageId).toBe('camel-id');
+      expect(messages[0].metadata?.sdkMessageId).toBe("camel-id");
     });
   });
 
   // --- Multi-turn state machine ---
 
-  describe('multi-turn state machine', () => {
+  describe("multi-turn state machine", () => {
     function emitCodexEvent(msg: Record<string, unknown>): void {
       mockNotificationHandler?.({
-        method: 'codex/event',
+        method: "codex/event",
         params: { msg },
       });
     }
 
-    it('transitions connecting → idle after initialize', async () => {
+    it("transitions connecting → idle after initialize", async () => {
       // send() from connecting state waits for ready then succeeds
-      await session.send('first');
+      await session.send("first");
       await vi.advanceTimersByTimeAsync(0);
 
       // Should have called codex tool
       expect(mockCallToolFn).toHaveBeenCalledWith(
-        expect.objectContaining({ name: 'codex' }),
+        expect.objectContaining({ name: "codex" }),
         undefined,
         expect.any(Object),
       );
     });
 
-    it('transitions idle → working → idle on tool call completion', async () => {
+    it("transitions idle → working → idle on tool call completion", async () => {
       mockCallToolFn.mockResolvedValueOnce({
-        content: [{ type: 'text', text: 'Done' }],
-        sessionId: 'sess-1',
+        content: [{ type: "text", text: "Done" }],
+        sessionId: "sess-1",
       });
 
-      await session.send('task 1');
+      await session.send("task 1");
       await vi.advanceTimersByTimeAsync(0);
 
       // After tool call completes, state should be idle
       // Verify by sending again (would throw if still working)
-      await session.send('task 2');
+      await session.send("task 2");
       await vi.advanceTimersByTimeAsync(0);
 
       expect(mockCallToolFn).toHaveBeenCalledTimes(2);
-      expect(mockCallToolFn.mock.calls[1][0].name).toBe('codex-reply');
+      expect(mockCallToolFn.mock.calls[1][0].name).toBe("codex-reply");
     });
 
-    it('throws when sending while working', async () => {
+    it("throws when sending while working", async () => {
       // Make tool call hang (never resolves)
       mockCallToolFn.mockReturnValueOnce(new Promise(() => {}));
 
-      await session.send('long task');
+      await session.send("long task");
       // Don't advance timers — tool call still pending
 
-      await expect(session.send('another')).rejects.toThrow(/still processing/);
+      await expect(session.send("another")).rejects.toThrow(/still processing/);
     });
 
-    it('task_complete sets taskCompleted flag, keeps session alive', async () => {
+    it("task_complete sets taskCompleted flag, keeps session alive", async () => {
       mockCallToolFn.mockResolvedValueOnce({
-        content: [{ type: 'text', text: 'Done' }],
-        sessionId: 'sess-tc',
+        content: [{ type: "text", text: "Done" }],
+        sessionId: "sess-tc",
       });
 
-      await session.send('do something');
+      await session.send("do something");
 
       // task_complete fires via notification before tool call returns
-      emitCodexEvent({ type: 'task_complete' });
+      emitCodexEvent({ type: "task_complete" });
 
-      const completeEvent = events.find((e) => e.type === 'task_complete');
+      const completeEvent = events.find((e) => e.type === "task_complete");
       expect(completeEvent).toBeDefined();
 
       // Let tool call complete
       await vi.advanceTimersByTimeAsync(0);
 
       // Session should still be usable (idle, not stopped)
-      await session.send('follow up');
+      await session.send("follow up");
       await vi.advanceTimersByTimeAsync(0);
 
       expect(mockCallToolFn).toHaveBeenCalledTimes(2);
     });
 
-    it('initialPrompt sets working state correctly', async () => {
+    it("initialPrompt sets working state correctly", async () => {
       const s = new CodexMCPSession({
-        cwd: '/tmp',
-        mode: 'remote',
-        initialPrompt: 'auto start',
+        cwd: "/tmp",
+        mode: "remote",
+        initialPrompt: "auto start",
       });
 
       // Set up first call (from initialPrompt) to return sessionId
       // Must be set BEFORE microtasks flush (connect resolves → initialize continues)
       mockCallToolFn.mockResolvedValueOnce({
-        content: [{ type: 'text', text: 'Started' }],
-        sessionId: 'sess-auto',
+        content: [{ type: "text", text: "Started" }],
+        sessionId: "sess-auto",
       });
 
       await vi.advanceTimersByTimeAsync(0);
 
       expect(mockCallToolFn).toHaveBeenCalledWith(
         expect.objectContaining({
-          name: 'codex',
-          arguments: expect.objectContaining({ prompt: 'auto start' }),
+          name: "codex",
+          arguments: expect.objectContaining({ prompt: "auto start" }),
         }),
         undefined,
         expect.any(Object),
@@ -1079,30 +1091,30 @@ describe('CodexMCPSession', () => {
 
       // After completion, session should be idle and accept more sends
       s.onMessage(() => {});
-      await s.send('next task');
+      await s.send("next task");
       await vi.advanceTimersByTimeAsync(0);
       expect(mockCallToolFn).toHaveBeenCalledTimes(2);
-      expect(mockCallToolFn.mock.calls[1][0].name).toBe('codex-reply');
+      expect(mockCallToolFn.mock.calls[1][0].name).toBe("codex-reply");
     });
   });
 
   // --- Transport close handling ---
 
-  describe('transport close handling', () => {
+  describe("transport close handling", () => {
     function emitCodexEvent(msg: Record<string, unknown>): void {
       mockNotificationHandler?.({
-        method: 'codex/event',
+        method: "codex/event",
         params: { msg },
       });
     }
 
-    it('idle disconnect emits ready event (not error)', async () => {
+    it("idle disconnect emits ready event (not error)", async () => {
       mockCallToolFn.mockResolvedValueOnce({
-        content: [{ type: 'text', text: 'Done' }],
-        sessionId: 'sess-idle-close',
+        content: [{ type: "text", text: "Done" }],
+        sessionId: "sess-idle-close",
       });
 
-      await session.send('task');
+      await session.send("task");
       await vi.advanceTimersByTimeAsync(0);
 
       // Session is now idle — trigger transport close
@@ -1110,15 +1122,15 @@ describe('CodexMCPSession', () => {
       transport.onclose?.();
 
       // Should emit 'ready' type (not 'error') for idle disconnect
-      const closeEvent = events.find(
-        (e) => e.summary.includes('disconnected (idle)'),
+      const closeEvent = events.find((e) =>
+        e.summary.includes("disconnected (idle)"),
       );
       expect(closeEvent).toBeDefined();
-      expect(closeEvent!.type).toBe('ready');
-      expect(closeEvent!.severity).toBe('info');
+      expect(closeEvent!.type).toBe("ready");
+      expect(closeEvent!.severity).toBe("info");
     });
 
-    it('taskCompleted disconnect emits ready event even if still working', async () => {
+    it("taskCompleted disconnect emits ready event even if still working", async () => {
       // Simulate: task_complete arrives, but tool call hasn't returned yet
       mockCallToolFn.mockReturnValueOnce(
         new Promise((resolve) => {
@@ -1127,39 +1139,41 @@ describe('CodexMCPSession', () => {
         }),
       );
 
-      await session.send('task');
+      await session.send("task");
 
       // task_complete notification arrives
-      emitCodexEvent({ type: 'task_complete' });
+      emitCodexEvent({ type: "task_complete" });
 
       // Transport closes while technically still 'working'
       const transport = mockTransportInstances[0];
       transport.onclose?.();
 
       // With taskCompleted=true, should emit ready (not urgent error)
-      const closeEvent = events.find(
-        (e) => e.summary.includes('disconnected (idle)'),
+      const closeEvent = events.find((e) =>
+        e.summary.includes("disconnected (idle)"),
       );
       expect(closeEvent).toBeDefined();
-      expect(closeEvent!.type).toBe('ready');
+      expect(closeEvent!.type).toBe("ready");
     });
 
-    it('unexpected disconnect during working emits urgent error', async () => {
+    it("unexpected disconnect during working emits urgent error", async () => {
       // Tool call hangs — state is 'working', no task_complete
       mockCallToolFn.mockReturnValueOnce(new Promise(() => {}));
-      await session.send('task');
+      await session.send("task");
 
       const transport = mockTransportInstances[0];
       transport.onclose?.();
 
       const errorEvent = events.find(
-        (e) => e.severity === 'urgent' && e.summary.includes('terminated unexpectedly'),
+        (e) =>
+          e.severity === "urgent" &&
+          e.summary.includes("terminated unexpectedly"),
       );
       expect(errorEvent).toBeDefined();
-      expect(errorEvent!.type).toBe('error');
+      expect(errorEvent!.type).toBe("error");
     });
 
-    it('stopped session ignores transport close', async () => {
+    it("stopped session ignores transport close", async () => {
       await session.stop();
 
       const eventCountBefore = events.length;
@@ -1173,14 +1187,14 @@ describe('CodexMCPSession', () => {
 
   // --- Reconnect ---
 
-  describe('reconnect', () => {
-    it('reconnects transparently when sending after disconnect', async () => {
+  describe("reconnect", () => {
+    it("reconnects transparently when sending after disconnect", async () => {
       mockCallToolFn.mockResolvedValueOnce({
-        content: [{ type: 'text', text: 'First done' }],
-        sessionId: 'sess-reconnect',
+        content: [{ type: "text", text: "First done" }],
+        sessionId: "sess-reconnect",
       });
 
-      await session.send('first task');
+      await session.send("first task");
       await vi.advanceTimersByTimeAsync(0);
 
       // Simulate idle disconnect
@@ -1189,32 +1203,32 @@ describe('CodexMCPSession', () => {
 
       // Send again — should trigger reconnect (creates new Client + Transport)
       // After reconnect, mockCallToolFn is the NEW Client's mock
-      await session.send('second task');
+      await session.send("second task");
       await vi.advanceTimersByTimeAsync(0);
 
       // Should have created a new transport (reconnect)
       expect(mockTransportInstances.length).toBe(2);
       // The new Client's callTool should have been called with codex-reply
       expect(mockCallToolFn).toHaveBeenCalledTimes(1);
-      expect(mockCallToolFn.mock.calls[0][0].name).toBe('codex-reply');
+      expect(mockCallToolFn.mock.calls[0][0].name).toBe("codex-reply");
     });
 
-    it('cleans up old transport stderr listeners on reconnect', async () => {
+    it("cleans up old transport stderr listeners on reconnect", async () => {
       mockCallToolFn.mockResolvedValueOnce({
         content: [],
-        sessionId: 'sess-cleanup',
+        sessionId: "sess-cleanup",
       });
 
-      await session.send('task');
+      await session.send("task");
       await vi.advanceTimersByTimeAsync(0);
 
       const oldTransport = mockTransportInstances[0];
-      const removeAllSpy = vi.spyOn(oldTransport.stderr, 'removeAllListeners');
+      const removeAllSpy = vi.spyOn(oldTransport.stderr, "removeAllListeners");
 
       // Trigger disconnect + reconnect
       oldTransport.onclose?.();
       mockCallToolFn.mockResolvedValueOnce({ content: [] });
-      await session.send('reconnect task');
+      await session.send("reconnect task");
       await vi.advanceTimersByTimeAsync(0);
 
       expect(removeAllSpy).toHaveBeenCalled();
@@ -1224,18 +1238,18 @@ describe('CodexMCPSession', () => {
 
   // --- clearSession ---
 
-  describe('clearSession', () => {
-    it('resets session state when idle', async () => {
+  describe("clearSession", () => {
+    it("resets session state when idle", async () => {
       mockCallToolFn.mockResolvedValueOnce({
         content: [],
-        sessionId: 'sess-clear',
-        conversationId: 'conv-clear',
+        sessionId: "sess-clear",
+        conversationId: "conv-clear",
       });
 
-      await session.send('task');
+      await session.send("task");
       await vi.advanceTimersByTimeAsync(0);
 
-      expect(session.realSessionId).toBe('sess-clear');
+      expect(session.realSessionId).toBe("sess-clear");
 
       session.clearSession();
 
@@ -1243,64 +1257,129 @@ describe('CodexMCPSession', () => {
       expect(session.realSessionId).toBeNull();
 
       // Next send should use 'codex' (new session) not 'codex-reply'
-      await session.send('fresh start');
+      await session.send("fresh start");
       await vi.advanceTimersByTimeAsync(0);
 
-      expect(mockCallToolFn.mock.calls[1][0].name).toBe('codex');
+      expect(mockCallToolFn.mock.calls[1][0].name).toBe("codex");
     });
 
-    it('throws when clearing during working state', async () => {
+    it("throws when clearing during working state", async () => {
       mockCallToolFn.mockReturnValueOnce(new Promise(() => {}));
-      await session.send('task');
+      await session.send("task");
 
       expect(() => session.clearSession()).toThrow(/Cannot clear session/);
     });
 
-    it('throws when clearing during connecting state', () => {
+    it("throws when clearing during connecting state", () => {
       // Session is in 'connecting' state right after construction
       // But initialize is async and may have already resolved...
       // Create a session where connect hangs
       mockConnectFn.mockReturnValueOnce(new Promise(() => {}));
-      const s = new CodexMCPSession({ cwd: '/tmp', mode: 'remote' });
+      const s = new CodexMCPSession({ cwd: "/tmp", mode: "remote" });
 
       expect(() => s.clearSession()).toThrow(/Cannot clear session/);
     });
 
-    it('denies pending permissions on clear', async () => {
+    it("denies pending permissions on clear", async () => {
       mockCallToolFn.mockResolvedValueOnce({ content: [] });
-      await session.send('task');
+      await session.send("task");
       await vi.advanceTimersByTimeAsync(0);
 
       // Create a pending permission
       const permPromise = mockRequestHandler?.({
         params: {
-          codex_call_id: 'perm-clear',
-          codex_command: ['echo'],
-          codex_cwd: '/tmp',
+          codex_call_id: "perm-clear",
+          codex_command: ["echo"],
+          codex_cwd: "/tmp",
         },
       });
 
       session.clearSession();
 
       const result = await permPromise;
-      expect(result).toEqual({ action: 'denied' });
+      expect(result).toEqual({ action: "denied" });
     });
   });
 
   // --- Initialize failure ---
 
-  describe('initialize failure', () => {
-    it('sets stopped state on connect failure', async () => {
-      nextConnectError = new Error('Connection refused');
+  describe("initialize failure", () => {
+    it("sets stopped state on connect failure", async () => {
+      nextConnectError = new Error("Connection refused");
 
-      const s = new CodexMCPSession({ cwd: '/tmp', mode: 'remote' });
+      const s = new CodexMCPSession({ cwd: "/tmp", mode: "remote" });
       s.onEvent((e) => events.push(e));
 
       // waitForReady should reject
       await expect(s.waitForReady()).rejects.toThrow(/Connection refused/);
 
       // Session should be stopped
-      await expect(s.send('test')).rejects.toThrow(/stopped/);
+      await expect(s.send("test")).rejects.toThrow(/stopped/);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findCodexResumeFile tests (uses real fs, no mocks needed)
+// ---------------------------------------------------------------------------
+
+describe("findCodexResumeFile", () => {
+  it("finds a session file matching the session ID", () => {
+    const tmpDir = path.join(os.tmpdir(), `codex-test-${Date.now()}`);
+    const subDir = path.join(tmpDir, "2026", "03", "16");
+    mkdirSync(subDir, { recursive: true });
+
+    const sessionId = "019cf55a-266c-7332-a7ab-e5ab6d643597";
+    const fileName = `rollout-2026-03-16T14-34-11-${sessionId}.jsonl`;
+    writeFileSync(path.join(subDir, fileName), "{}");
+
+    const result = findCodexResumeFile(sessionId, tmpDir);
+    expect(result).toBe(path.join(subDir, fileName));
+
+    rmSync(tmpDir, { recursive: true });
+  });
+
+  it("returns null when no matching file exists", () => {
+    const tmpDir = path.join(os.tmpdir(), `codex-test-${Date.now()}`);
+    mkdirSync(tmpDir, { recursive: true });
+
+    const result = findCodexResumeFile("nonexistent-id", tmpDir);
+    expect(result).toBeNull();
+
+    rmSync(tmpDir, { recursive: true });
+  });
+
+  it("returns the newest file when multiple matches exist", () => {
+    const tmpDir = path.join(os.tmpdir(), `codex-test-${Date.now()}`);
+    const dir1 = path.join(tmpDir, "2026", "03", "15");
+    const dir2 = path.join(tmpDir, "2026", "03", "16");
+    mkdirSync(dir1, { recursive: true });
+    mkdirSync(dir2, { recursive: true });
+
+    const sessionId = "abc-123";
+    const oldFile = path.join(
+      dir1,
+      `rollout-2026-03-15T10-00-00-${sessionId}.jsonl`,
+    );
+    const newFile = path.join(
+      dir2,
+      `rollout-2026-03-16T10-00-00-${sessionId}.jsonl`,
+    );
+    writeFileSync(oldFile, "{}");
+    // Ensure newFile has a later mtime
+    writeFileSync(newFile, "{}");
+
+    const result = findCodexResumeFile(sessionId, tmpDir);
+    expect(result).toBe(newFile);
+
+    rmSync(tmpDir, { recursive: true });
+  });
+
+  it("returns null when sessions directory does not exist", () => {
+    const result = findCodexResumeFile(
+      "any-id",
+      "/nonexistent/path/codex-test",
+    );
+    expect(result).toBeNull();
   });
 });
