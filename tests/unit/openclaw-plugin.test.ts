@@ -679,6 +679,27 @@ describe("createOpenClawTools", () => {
       const parsed = JSON.parse(result.content[0].text);
       expect(parsed.message).toContain("stopped");
     });
+
+    it("returns resumeLocally command and cwd on stop", async () => {
+      // Need a fresh session since the previous test already stopped sess-1
+      const newSession = createMockSession({ id: "sess-stop-2" });
+      mockProvider._setNextSession(newSession);
+      await manager.spawn(
+        "claude",
+        { cwd: "/tmp/project", mode: "remote" },
+        caller.userId,
+      );
+
+      const tool = findTool("session_stop");
+      const result = (await tool.execute("call-1", {
+        sessionId: "sess-stop-2",
+      })) as { content: Array<{ text: string }> };
+
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.message).toContain("stopped");
+      expect(parsed.resumeLocally).toBe("claude --resume sess-stop-2");
+      expect(parsed.cwd).toBe("/tmp/test-project");
+    });
   });
 
   // -----------------------------------------------------------------------

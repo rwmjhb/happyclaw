@@ -761,13 +761,25 @@ function createOpenClawTools(
         const sessionId = params.sessionId as string;
         manager.acl.assertOwner(caller.userId, sessionId);
 
+        // Capture session info before stop (stop removes it from manager)
+        const session = manager.get(sessionId);
+        const sessionCwd = session.cwd;
+        const sessionProvider = session.provider;
+
         await manager.stop(sessionId, params.force as boolean | undefined);
 
         // Unbind push adapter (flushes remaining messages)
         pushAdapter?.unbindSession(sessionId);
 
         log("stop", sessionId, { force: params.force });
-        return textResult({ message: "Session stopped." });
+        return textResult({
+          message: "Session stopped.",
+          resumeLocally:
+            sessionProvider === "claude"
+              ? `claude --resume ${sessionId}`
+              : undefined,
+          cwd: sessionCwd,
+        });
       },
     },
 
