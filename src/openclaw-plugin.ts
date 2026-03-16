@@ -497,7 +497,7 @@ function createOpenClawTools(
         }
 
         // Bind push adapter so Claude output goes directly to TG
-        pushAdapter?.bindSession(session.id, caller.channelId);
+        pushAdapter?.bindSession(session.id);
 
         log("spawn", session.id, {
           provider: params.provider,
@@ -569,7 +569,7 @@ function createOpenClawTools(
           initialPrompt: params.task as string,
         });
 
-        pushAdapter?.bindSession(session.id, caller.channelId);
+        pushAdapter?.bindSession(session.id);
 
         log("resume", sessionId);
         return textResult({
