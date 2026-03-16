@@ -701,6 +701,34 @@ describe("createOpenClawTools", () => {
       expect(parsed.cwd).toBe("/tmp/test-project");
     });
 
+    it("returns codex resume command with realSessionId for codex sessions", async () => {
+      const codexProvider = createMockProvider("codex");
+      manager.registerProvider(codexProvider);
+
+      const codexSession = createMockSession({
+        id: "codex-pending-123",
+        provider: "codex",
+      });
+      (codexSession as Record<string, unknown>).realSessionId =
+        "real-codex-id-456";
+      codexProvider._setNextSession(codexSession);
+
+      await manager.spawn(
+        "codex",
+        { cwd: "/tmp/project", mode: "remote" },
+        caller.userId,
+      );
+
+      const tool = findTool("session_stop");
+      const result = (await tool.execute("call-1", {
+        sessionId: "codex-pending-123",
+      })) as { content: Array<{ text: string }> };
+
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.resumeLocally).toBe("codex resume real-codex-id-456");
+      expect(parsed.cwd).toBe("/tmp/test-project");
+    });
+
     it("returns original resumeSessionId in resumeLocally for handoff sessions", async () => {
       // Simulate: SDK returns new ID "sdk-new-id" but original was "local-original-id"
       const newSession = createMockSession({ id: "sdk-new-id" });

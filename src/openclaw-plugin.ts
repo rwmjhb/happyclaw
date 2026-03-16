@@ -774,23 +774,39 @@ function createOpenClawTools(
         const sessionCwd = session.cwd;
         const sessionProvider = session.provider;
 
+        // Codex: capture real MCP session ID (for TG → Mac handoff)
+        const codexRealId =
+          "realSessionId" in session
+            ? (session as { realSessionId: string | null }).realSessionId
+            : null;
+
         await manager.stop(sessionId, params.force as boolean | undefined);
 
         // Unbind push adapter (flushes remaining messages)
         pushAdapter?.unbindSession(sessionId);
 
-        // Use original resumeSessionId if this was a handoff session,
-        // because SDK generates a new ID but Mac needs the original one
-        const resumeId = originalResumeIds.get(sessionId) ?? sessionId;
+        // Determine the correct resume ID per provider:
+        // - Claude: use original resumeSessionId (disk has original file)
+        // - Codex: use real MCP session ID (disk has new file)
+        let resumeId: string;
+        let resumeCmd: string | undefined;
+
+        if (sessionProvider === "claude") {
+          resumeId = originalResumeIds.get(sessionId) ?? sessionId;
+          resumeCmd = `claude --resume ${resumeId}`;
+        } else if (sessionProvider === "codex") {
+          resumeId = codexRealId ?? sessionId;
+          resumeCmd = `codex resume ${resumeId}`;
+        } else {
+          resumeId = sessionId;
+        }
+
         originalResumeIds.delete(sessionId);
 
         log("stop", sessionId, { force: params.force });
         return textResult({
           message: "Session stopped.",
-          resumeLocally:
-            sessionProvider === "claude"
-              ? `claude --resume ${resumeId}`
-              : undefined,
+          resumeLocally: resumeCmd,
           cwd: sessionCwd,
         });
       },
