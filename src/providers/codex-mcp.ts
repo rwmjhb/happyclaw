@@ -670,6 +670,21 @@ export class CodexMCPSession implements ProviderSession {
       config.config = { mcp_servers: this.spawnOptions.mcpServers };
     }
 
+    // experimental_resume: load transcript from disk for session handoff
+    if (this.spawnOptions.resumeSessionId) {
+      const resumeFile = findCodexResumeFile(this.spawnOptions.resumeSessionId);
+      if (!resumeFile) {
+        throw new Error(
+          `Codex session file not found for ID: ${this.spawnOptions.resumeSessionId}. ` +
+            "Check ~/.codex/sessions/ directory.",
+        );
+      }
+      config.config = {
+        ...(config.config ?? {}),
+        experimental_resume: resumeFile,
+      };
+    }
+
     this.turnMessageCount = 0;
 
     const response = await this.client.callTool(
