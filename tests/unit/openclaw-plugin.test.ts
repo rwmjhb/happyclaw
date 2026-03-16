@@ -700,6 +700,28 @@ describe("createOpenClawTools", () => {
       expect(parsed.resumeLocally).toBe("claude --resume sess-stop-2");
       expect(parsed.cwd).toBe("/tmp/test-project");
     });
+
+    it("returns original resumeSessionId in resumeLocally for handoff sessions", async () => {
+      // Simulate: SDK returns new ID "sdk-new-id" but original was "local-original-id"
+      const newSession = createMockSession({ id: "sdk-new-id" });
+      mockProvider._setNextSession(newSession);
+
+      const spawnTool = findTool("session_spawn");
+      await spawnTool.execute("call-1", {
+        provider: "claude",
+        cwd: "/tmp/project",
+        task: "continue",
+        resumeSessionId: "local-original-id",
+      });
+
+      const stopTool = findTool("session_stop");
+      const result = (await stopTool.execute("call-2", {
+        sessionId: "sdk-new-id",
+      })) as { content: Array<{ text: string }> };
+
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.resumeLocally).toBe("claude --resume local-original-id");
+    });
   });
 
   // -----------------------------------------------------------------------

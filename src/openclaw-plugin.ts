@@ -227,6 +227,9 @@ function createOpenClawTools(
   caller: CallerContext,
   pushAdapter?: TelegramPushAdapter,
 ) {
+  /** Maps SDK session ID → original resumeSessionId (for Mac resume) */
+  const originalResumeIds = new Map<string, string>();
+
   /** Fire-and-forget audit */
   const log = (
     action: string,
@@ -487,6 +490,11 @@ function createOpenClawTools(
           },
           caller.userId,
         );
+
+        // Track original resumeSessionId for Mac handoff
+        if (params.resumeSessionId) {
+          originalResumeIds.set(session.id, params.resumeSessionId as string);
+        }
 
         // Bind push adapter so Claude output goes directly to TG
         pushAdapter?.bindSession(session.id);
@@ -771,12 +779,17 @@ function createOpenClawTools(
         // Unbind push adapter (flushes remaining messages)
         pushAdapter?.unbindSession(sessionId);
 
+        // Use original resumeSessionId if this was a handoff session,
+        // because SDK generates a new ID but Mac needs the original one
+        const resumeId = originalResumeIds.get(sessionId) ?? sessionId;
+        originalResumeIds.delete(sessionId);
+
         log("stop", sessionId, { force: params.force });
         return textResult({
           message: "Session stopped.",
           resumeLocally:
             sessionProvider === "claude"
-              ? `claude --resume ${sessionId}`
+              ? `claude --resume ${resumeId}`
               : undefined,
           cwd: sessionCwd,
         });
