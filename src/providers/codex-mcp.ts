@@ -679,6 +679,10 @@ export class CodexMCPSession implements ProviderSession {
             "Check ~/.codex/sessions/ directory.",
         );
       }
+      // eslint-disable-next-line no-console
+      console.info(
+        `[Codex] experimental_resume: sessionId=${this.spawnOptions.resumeSessionId}, file=${resumeFile}`,
+      );
       config.config = {
         ...(config.config ?? {}),
         experimental_resume: resumeFile,

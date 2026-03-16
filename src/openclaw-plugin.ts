@@ -521,6 +521,7 @@ function createOpenClawTools(
         log("spawn", session.id, {
           provider: params.provider,
           cwd: params.cwd,
+          resumeSessionId: params.resumeSessionId ?? undefined,
         });
         return textResult({
           id: session.id,
