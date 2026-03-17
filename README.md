@@ -110,7 +110,6 @@ codex resume xyz-789
 | `session_send` | Send input to a session / 向会话发送输入 |
 | `session_read` | Read session output (rarely needed — push handles delivery) / 读取会话输出 |
 | `session_respond` | Approve/deny permission requests / 批准或拒绝权限请求 |
-| `session_switch` | Switch between local/remote mode / 切换本地/远程模式 |
 | `session_stop` | Stop a session / 停止会话 |
 | `session_summary` | Get session summary stats / 获取会话摘要 |
 
